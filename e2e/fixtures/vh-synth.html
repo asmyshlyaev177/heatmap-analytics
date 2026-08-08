@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture — synthesized clicks</title>
+<style>
+  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+  section { min-height: 700px; padding: 40px 24px; }
+  button { padding: 12px 18px; font-size: 16px; cursor: pointer; }
+  form { display: grid; gap: 10px; max-width: 320px; margin-top: 20px; }
+</style>
+</head>
+<body>
+  <section id="vh-main">
+    <h1 id="vh-heading">Synth click guards</h1>
+
+    <!-- button-ish element nested inside a link: replaying it would navigate -->
+    <a id="vh-link" href="/vh-gone.html"><span role="button" id="vh-in-link">Go</span></a>
+
+    <!-- a form: nothing inside it may be replayed unless it opts in -->
+    <form id="vh-form" action="/vh-gone.html" method="get">
+      <button type="button" id="vh-plain">Plain</button>
+      <button type="button" data-hm-replay id="vh-optin" aria-expanded="false">Filters</button>
+      <button data-hm-replay id="vh-implicit">Implicit submit</button>
+      <input id="vh-text" name="q" autocomplete="off" placeholder="Query">
+    </form>
+
+    <button type="button" id="vh-free">Free</button>
+    <button type="button" data-hm-static id="vh-static">Opted out</button>
+  </section>
+
+  <script>
+    // Log what actually happened, and keep a submit from taking the log with it.
+    window.__fired = [];
+    addEventListener("click", (e) => window.__fired.push("click:" + e.target.id), true);
+    addEventListener("submit", (e) => {
+      window.__fired.push("submit");
+      e.preventDefault();
+    }, true);
+    document.getElementById("vh-optin").addEventListener("click", (e) => {
+      const b = e.currentTarget;
+      b.setAttribute("aria-expanded", b.getAttribute("aria-expanded") === "true" ? "false" : "true");
+    });
+  </script>
+</body>
+</html>

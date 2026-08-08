@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>heatmap e2e</title>
+<style>
+  body { margin: 0; font: 16px system-ui; }
+  section { height: 800px; padding: 40px; box-sizing: border-box; }
+  #hero { background: #e8ecf8; }
+  #features { background: #e8f8ec; }
+  #pricing { background: #f8ece8; }
+  #cta-button { padding: 16px 32px; font-size: 18px; cursor: pointer; }
+  #broken-btn { padding: 16px 24px; font-size: 18px; margin-left: 24px; }
+</style>
+<script>
+  // The tracker skips automated browsers via navigator.webdriver — undo that
+  // for this e2e run only.
+  Object.defineProperty(navigator, "webdriver", { get: () => false });
+</script>
+<script async src="../dist/tracker.js"
+        data-endpoint="https://heatmap-analytics.asmyshlyaev177.workers.dev"></script>
+</head>
+<body>
+  <section id="hero">
+    <h1>Hero section</h1>
+    <p>Landing page hero copy.</p>
+    <button id="cta-button">Call to action</button>
+    <button id="broken-btn">Broken button</button>
+  </section>
+  <section id="features">
+    <h2>Features</h2>
+    <p>Feature list goes here.</p>
+  </section>
+  <section id="pricing">
+    <h2>Pricing</h2>
+    <p>Pricing table goes here.</p>
+  </section>
+</body>
+</html>

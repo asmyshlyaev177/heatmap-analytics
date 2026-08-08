@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // No "WebWorker": its globals collide with DOM's, and the collision
+    // downgraded addEventListener's typed event maps to bare Event in the
+    // tracker. The worker code needs only Request/Response/crypto, which DOM
+    // provides; D1's types are declared in src/env.d.ts.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    // tests import source with explicit .ts extensions, which is what Node's
+    // strip-only type stripping requires at runtime
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "test", "e2e", "playwright.config.ts"]
+}

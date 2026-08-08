@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture — landing</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+  header { display: flex; gap: 16px; align-items: center; padding: 16px 24px; border-bottom: 1px solid #ddd; }
+  section { min-height: 700px; padding: 40px 24px; }
+  #hero { background: #eef2fb; }
+  #features { background: #eefbf2; }
+  #pricing { background: #fbf2ee; }
+  button { padding: 14px 22px; font-size: 16px; cursor: pointer; }
+  #cta { background: #3b4fd8; color: #fff; border: 0; border-radius: 6px; }
+  #broken { background: #eee; border: 1px solid #bbb; border-radius: 6px; }
+  dialog { padding: 24px; border: 1px solid #999; border-radius: 10px; }
+  form { margin-top: 20px; display: grid; gap: 10px; max-width: 320px; }
+  input { padding: 10px; font-size: 15px; }
+</style>
+<script>
+  // The tracker deliberately ignores automated browsers. Undo that here so
+  // specs can exercise its behavior; the guard itself is covered by a
+  // dedicated spec that loads the tracker WITHOUT this override.
+  if (!location.search.includes("keep-webdriver")) {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+  }
+</script>
+</head>
+<body>
+  <header>
+    <a id="brand" href="/index.html">Fixture Site</a>
+    <nav>
+      <a id="to-blog" href="/blog.html">Blog</a>
+    </nav>
+  </header>
+
+  <section id="hero">
+    <h1 id="headline">Fixture landing page</h1>
+    <p id="lede">Copy used by the heatmap-analytics end-to-end specs.</p>
+    <button id="cta" type="button">Open modal</button>
+    <button id="broken" type="button">Broken button</button>
+    <button id="soft-nav" type="button">Soft nav to /virtual</button>
+
+    <form id="card-form" onsubmit="return false">
+      <input id="card-number" name="card" autocomplete="off" placeholder="Card number">
+      <input id="cvv" name="cvv" autocomplete="off" placeholder="CVV">
+      <button id="pay" type="submit">Pay</button>
+    </form>
+  </section>
+
+  <section id="features"><h2 id="features-title">Features</h2></section>
+  <section id="pricing"><h2 id="pricing-title">Pricing</h2></section>
+
+  <dialog id="modal">
+    <h2 id="modal-title">Modal title</h2>
+    <p id="modal-body">Modal content that only exists once opened.</p>
+    <button id="modal-close" type="button">Close</button>
+  </dialog>
+
+  <script>
+    document.getElementById("cta").addEventListener("click", () => {
+      document.getElementById("modal").show();
+    });
+    document.getElementById("modal-close").addEventListener("click", () => {
+      document.getElementById("modal").close();
+    });
+    // client-side route change, like Astro ClientRouter / any SPA router
+    document.getElementById("soft-nav").addEventListener("click", () => {
+      history.pushState({}, "", "/virtual");
+    });
+  </script>
+</body>
+</html>

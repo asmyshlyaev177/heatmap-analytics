@@ -1,0 +1,25 @@
+{
+  "name": "heatmap-analytics",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted heatmap + session replay analytics on Cloudflare Workers + D1. ~1.5KB gzipped tracker, no cookies, one anonymous localStorage id.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:schema": "wrangler d1 execute heatmap-analytics --file=schema.sql --remote",
+    "db:schema:local": "wrangler d1 execute heatmap-analytics --file=schema.sql",
+    "test": "pnpm run test:unit && pnpm run test:e2e",
+    "test:unit": "node --test 'test/**/*.test.ts'",
+    "test:e2e": "HM_ENDPOINT= pnpm run build && playwright test",
+    "test:e2e:ui": "HM_ENDPOINT= pnpm run build && playwright test --ui",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.25.5",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.27.0"
+  }
+}

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture — frame host</title>
+<style>
+  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
+  #frame-host-btn { margin: 16px; padding: 14px 22px; font-size: 16px; }
+  iframe { display: block; width: 1000px; height: 600px; border: 1px solid #ccc; }
+</style>
+<script>
+  // Same webdriver neutralisation as the other fixtures, so a silent tracker
+  // in the child frame can only be the frame guard talking.
+  if (!location.search.includes("keep-webdriver")) {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+  }
+</script>
+</head>
+<body>
+  <button id="frame-host-btn" type="button">Top-level button</button>
+  <iframe id="hma-child" name="hma-child" src="/index.html" title="embedded fixture"></iframe>
+</body>
+</html>

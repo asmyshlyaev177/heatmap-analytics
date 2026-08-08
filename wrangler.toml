@@ -1,0 +1,29 @@
+name = "heatmap-analytics"
+main = "src/worker.ts"
+compatibility_date = "2026-08-01"
+
+# tracker/viewer bundles are built to .txt so the worker can inline them as strings
+rules = [
+  { type = "Text", globs = ["**/*.txt"], fallthrough = true }
+]
+
+[build]
+command = "node scripts/build.mjs"
+
+# nightly purge of data older than RETENTION_DAYS
+[triggers]
+crons = ["0 4 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "heatmap-analytics"
+database_id = "1a9ffadf-7be4-401a-b732-ce6e9a903ed3"
+
+[vars]
+RETENTION_DAYS = "30"
+# Comma-separated allowlist of site keys; leave unset to accept any. Keys are
+# the tracked page's location.hostname.
+# ALLOWED_SITES = "asmyshlyaev177.dev,react-horizontal-scrolling-menu.asmyshlyaev177.workers.dev"
+
+# Secrets (set via `wrangler secret put`):
+#   VIEWER_TOKEN — required for all /api/* read endpoints

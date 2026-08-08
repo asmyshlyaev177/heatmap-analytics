@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture — offset body</title>
+<style>
+  /* The heat canvas must land on the document origin even when the body is a
+     positioned, centred, margined containing block — as most real sites are. */
+  html { padding-top: 24px; }
+  body { position: relative; margin: 0 auto; max-width: 900px; border: 6px solid #ccc;
+         font: 16px/1.5 system-ui, sans-serif; background: #fff; }
+  section { min-height: 600px; padding: 40px 24px; background: #eef2fb; }
+  button { padding: 14px 22px; font-size: 16px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <section id="vh-hero">
+    <h1 id="vh-title">Offset body fixture</h1>
+    <button id="vh-target" type="button">Target</button>
+  </section>
+  <section id="vh-second"><h2 id="vh-second-title">Second</h2></section>
+</body>
+</html>
