@@ -23,7 +23,10 @@ export interface Beacon {
     vw: number;
     vh: number;
     sa: number;
+    /** wall clock: ms from pageview start to the last recorded event */
     d: number;
+    /** engaged time: visible-tab ms within the grace period of an interaction */
+    am: number;
     msc: number;
     ev: { s: number; k: string; el?: string; rx?: number; ry?: number; x?: number; y?: number; t: number }[];
   } | null;
@@ -200,5 +203,9 @@ export async function openViewer(page: Page, site = "e2e"): Promise<void> {
 export const panel = (page: Page) => page.locator("#__hma-panel");
 export const status = (page: Page) => page.locator("#__hma-status");
 export const rows = (page: Page) => page.locator("#__hma-body .__hma-row");
+/** Permanent fixture of the panel — present whenever the panel is. */
+export const timeline = (page: Page) => page.locator("#__hma-timeline");
+/** Everything a replay draws into the timeline: gone means the track is idle. */
+export const tlSegs = (page: Page) => page.locator("#__hma-track > div");
 export const tab = (page: Page, mode: string) =>
   page.locator(`#__hma-panel button[data-mode="${mode}"]`);

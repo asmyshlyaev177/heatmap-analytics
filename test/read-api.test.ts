@@ -269,6 +269,7 @@ test("apiReplay returns meta plus that pageview's events ordered by seq", async 
   };
 
   assert.deepEqual(Object.keys(meta).sort(), [
+    "active_ms",
     "duration_ms",
     "id",
     "max_scroll",

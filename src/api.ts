@@ -1,6 +1,8 @@
 // All collector/API logic, separated from worker.ts so tests can import it
 // without the bundled tracker/viewer text assets.
+import { ENGAGEMENT_GRACE_MS } from "./engagement.ts";
 import { SID_RE } from "./sid.ts";
+import { IDLE_GAP_MS } from "./timeline.ts";
 
 export interface Env {
   DB: D1Database;
@@ -59,6 +61,23 @@ export const SA_MAX_AGE_MS = 10 * 365 * 86_400_000;
 export const startedAt = (v: unknown, now: number): number => {
   const t = int(v);
   return t > now || t < now - SA_MAX_AGE_MS ? now : t;
+};
+
+// Engaged time off the beacon. A tracker that does not send one leaves NULL —
+// "never measured" — which the read API answers by reconstructing a floor from
+// the pageview's events; it is not the same claim as a measured zero, and the
+// column is nullable so the two cannot be confused.
+//
+// The upper bound is exact rather than arbitrary: engagement accrues only
+// while the page is open, so it cannot exceed the span to the last recorded
+// event plus the one grace period that can accrue after it. That keeps a
+// beacon from filing a visit as days long, and keeps the two clocks it sends
+// consistent with each other.
+export const activeMs = (v: unknown, durationMs: number): number | null => {
+  if (v == null) return null;
+  const n = int(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(n, Math.max(0, durationMs) + ENGAGEMENT_GRACE_MS));
 };
 
 // The viewer assigns pageviews.path to a full-viewport same-origin iframe's
@@ -123,15 +142,23 @@ export async function collect(req: Request, env: Env, now = Date.now()): Promise
   // session_id is only set on first insert, so a later flush of the same
   // pageview updates duration/scroll without re-keying the session — a visitor
   // who clears localStorage mid-pageview must not retro-split it.
-  // Both updated columns only ever grow: beacons are fire-and-forget and the
+  // Every updated column only ever grows: beacons are fire-and-forget and the
   // keepalive re-send can land after a later flush, and a rewound duration_ms
-  // both loses recorded time and splits the episode chained on it.
+  // both loses recorded time and splits the episode chained on it. active_ms
+  // takes the same treatment through a CASE rather than max(), so that a NULL
+  // from a tracker predating the measurement cannot erase a value a later
+  // flush already established.
+  const duration = int(body.d);
   const stmts: D1PreparedStatement[] = [
     env.DB.prepare(
-      `INSERT INTO pageviews (id, session_id, site, path, vw, vh, started_at, duration_ms, max_scroll)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+      `INSERT INTO pageviews (id, session_id, site, path, vw, vh, started_at, duration_ms, active_ms, max_scroll)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
        ON CONFLICT(id) DO UPDATE SET
          duration_ms = max(pageviews.duration_ms, excluded.duration_ms),
+         active_ms = CASE
+           WHEN excluded.active_ms IS NULL THEN pageviews.active_ms
+           ELSE max(coalesce(pageviews.active_ms, 0), excluded.active_ms)
+         END,
          max_scroll = max(pageviews.max_scroll, excluded.max_scroll)`,
     ).bind(
       pv.slice(0, 64),
@@ -141,7 +168,8 @@ export async function collect(req: Request, env: Env, now = Date.now()): Promise
       int(body.vw),
       int(body.vh),
       startedAt(body.sa, now),
-      int(body.d),
+      duration,
+      activeMs(body.am, duration),
       Math.max(0, Math.min(100, int(body.msc))),
     ),
   ];
@@ -229,20 +257,60 @@ export async function apiElements(url: URL, env: Env): Promise<Response> {
 export async function apiSessions(url: URL, env: Env): Promise<Response> {
   const site = url.searchParams.get("site") ?? "";
   const path = url.searchParams.get("path") ?? "/";
+  // Two different times per row, because one number cannot be both.
+  //
+  // duration_ms is wall clock: the tracker reports the timestamp of its last
+  // recorded event, so a tab opened and left alone for four minutes reports
+  // four minutes. That is the right input for episode chaining below (it says
+  // when the pageview stopped being touched) and a bad thing to show a human,
+  // who reads "⏱️ 3:35" as attention.
+  //
+  // active_ms is attention, measured in the browser (see src/tracker.ts) and
+  // read straight out of the column here. It is not derivable from what this
+  // table stores: the two facts that decide it — whether the tab was on screen,
+  // and whether a silence was a still read or an abandoned tab — are only
+  // knowable at the moment they happen.
+  //
+  // NULL means a tracker that did not measure it wrote the row: everything
+  // recorded before the column existed, plus beacons from pages still running
+  // a bundle cached before the change. Those get reconstructed rather than
+  // reported as zero — each gap between consecutive events counted up to
+  // IDLE_GAP_MS, the first running from the pageview's start (LAG default 0).
+  // Deliberately the short replay threshold and not ENGAGEMENT_GRACE_MS: with
+  // no visibility signal to lean on, a reconstruction should be a floor, and a
+  // floor is the one kind of wrong number that cannot flatter the page.
+  //
+  // Both bounds matter: `t` arrives from an unauthenticated beacon, so a
+  // negative or rewound one must not be able to subtract from anyone's total.
   const { results } = await env.DB.prepare(
-    `SELECT p.id AS id, p.session_id AS session_id, p.started_at AS started_at,
-            p.duration_ms AS duration_ms,
-            p.vw AS vw, p.vh AS vh, p.max_scroll AS max_scroll,
-            SUM(CASE WHEN e.k = 'c' THEN 1 ELSE 0 END) AS clicks,
-            SUM(CASE WHEN e.k = 'r' THEN 1 ELSE 0 END) AS rage,
-            COUNT(e.t) AS events
-     FROM pageviews p LEFT JOIN events e ON e.pv = p.id
-     WHERE p.site = ?1 AND p.path = ?2
-     GROUP BY p.id
-     ORDER BY p.started_at DESC
-     LIMIT 30`,
+    `WITH pv AS (
+       SELECT id, session_id, started_at, duration_ms, active_ms, vw, vh, max_scroll
+       FROM pageviews
+       WHERE site = ?1 AND path = ?2
+       ORDER BY started_at DESC
+       LIMIT 30
+     ),
+     gaps AS (
+       SELECT e.pv AS pv, e.k AS k,
+              e.t - LAG(e.t, 1, 0) OVER (PARTITION BY e.pv ORDER BY e.seq) AS gap
+       FROM events e JOIN pv ON pv.id = e.pv
+     )
+     SELECT pv.id AS id, pv.session_id AS session_id, pv.started_at AS started_at,
+            pv.duration_ms AS duration_ms,
+            pv.vw AS vw, pv.vh AS vh, pv.max_scroll AS max_scroll,
+            COALESCE(SUM(CASE WHEN g.k = 'c' THEN 1 ELSE 0 END), 0) AS clicks,
+            COALESCE(SUM(CASE WHEN g.k = 'r' THEN 1 ELSE 0 END), 0) AS rage,
+            COUNT(g.gap) AS events,
+            COALESCE(
+              pv.active_ms,
+              COALESCE(SUM(max(min(g.gap, ?3), 0)), 0)
+            ) AS active_ms,
+            pv.active_ms IS NULL AS active_estimated
+     FROM pv LEFT JOIN gaps g ON g.pv = pv.id
+     GROUP BY pv.id
+     ORDER BY pv.started_at DESC`,
   )
-    .bind(site, path)
+    .bind(site, path, IDLE_GAP_MS)
     .all();
 
   // pages = size of the row's episode, not the visitor's whole history
@@ -279,9 +347,20 @@ export async function apiSessions(url: URL, env: Env): Promise<Response> {
     // episodeAround() returns its whole input for an id it cannot find, which
     // is right for a journey and wrong for a count — a row missing from the
     // bounded lookup above would report the session's size as its own.
-    row.pages = list.some((p) => p.id === String(row.id))
-      ? episodeAround(list, String(row.id)).length
-      : 1;
+    const known = list.some((p) => p.id === String(row.id));
+    const episode = known ? episodeAround(list, String(row.id)) : [];
+    row.pages = known ? episode.length : 1;
+    // Which *visit* this row belongs to, keyed by the pageview the visit opened
+    // with. A session_id identifies a person and never rotates, so it cannot
+    // tell one visit from the next — on a site whose owner is its main visitor
+    // it never varies at all. This does, and rows sharing it are the rows one
+    // click replays together.
+    row.episode = known ? episode[0].id : row.id;
+    // …and where in that visit this row sits. The list is filtered to one path
+    // while an episode spans all of them, so these run 1-based over the whole
+    // journey and arrive non-contiguous (3, 7, 9) when a visitor kept coming
+    // back to this page — which is the interesting part.
+    row.leg = known ? episode.findIndex((p) => p.id === String(row.id)) + 1 : 1;
   }
   return json({ sessions: results });
 }

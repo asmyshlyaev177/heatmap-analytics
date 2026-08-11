@@ -15,10 +15,11 @@ import {
 // imported, not restated: the spec asserts the real contract, so a change to
 // either end has to keep passing here rather than quietly matching a stale copy
 import { SID_KEY, SID_RE } from "../../src/sid";
+import { ENGAGEMENT_GRACE_MS } from "../../src/engagement";
 
 const KINDS = ["c", "m", "s", "r"];
 const EVENT_KEYS = ["el", "k", "rx", "ry", "s", "t", "x", "y"];
-const BODY_KEYS = ["d", "ev", "msc", "path", "pv", "sa", "sid", "site", "v", "vh", "vw"];
+const BODY_KEYS = ["am", "d", "ev", "msc", "path", "pv", "sa", "sid", "site", "v", "vh", "vw"];
 
 const IDLE_MS = 2500;
 
@@ -387,6 +388,110 @@ test("duration is last-activity time, not wall clock", async ({ page }) => {
   // exceed `active` by that offset — but never by the idle stretch, which is
   // exactly what a wall-clock duration would add.
   expect(d).toBeLessThan(active + 300);
+});
+
+// ---------- engaged time ----------
+//
+// `d` above is wall clock and stops at the last recorded event. `am` is the
+// other half — how long the visitor was actually there — and it is measured in
+// the page precisely because the two things that decide it cannot be recovered
+// from the event stream afterwards: whether the tab was on screen, and whether
+// a silence was a still read or an abandoned tab.
+
+test("engaged time keeps counting after the last event, and the wall clock does not", async ({
+  page,
+}) => {
+  await openTracked(page);
+  await page.locator("#broken").click();
+  await wiggle(page, 2);
+  await page.waitForTimeout(IDLE_MS); // still on the page, just not touching it
+  await flush(page);
+
+  const [b] = await expectBeacons(page, 1);
+  const evs = b.body!.ev;
+  // the wall clock stops dead at the last thing recorded…
+  expect(b.body!.d).toBe(evs[evs.length - 1].t);
+  // …while the reading that followed it still counts, because the tab was up
+  expect(b.body!.am).toBeGreaterThan(b.body!.d + IDLE_MS - 400);
+  expect(b.body!.am).toBeLessThan(b.body!.d + IDLE_MS + 800);
+});
+
+test("a hidden tab accrues no engaged time however long it sits", async ({ page }) => {
+  const HIDDEN_MS = 3000;
+  await openTracked(page);
+  await page.locator("#broken").click();
+  await wiggle(page, 2);
+  await flush(page);
+  const [visible] = await expectBeacons(page, 1);
+
+  // hide the tab the way a background tab or a switched-away window does. The
+  // tracker flushes on the way out, so this beacon is the "went away" reading.
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    dispatchEvent(new Event("visibilitychange"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(HIDDEN_MS);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    dispatchEvent(new Event("visibilitychange"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await flush(page);
+
+  const beacons = await expectBeacons(page, 3);
+  const last = beacons[beacons.length - 1].body!;
+  // three seconds of wall clock passed and none of it was attention
+  expect(last.am).toBeLessThan(visible.body!.am + 600);
+  // and the pageview is the same one throughout — this is not a new visit
+  expect(last.pv).toBe(visible.body!.pv);
+});
+
+test("engaged time stops one grace period after the last interaction", async ({ page }) => {
+  // deliberately slow: the property under test is a threshold measured in real
+  // seconds, and faking the clock would test the fake instead of the tracker
+  test.setTimeout(90_000);
+  const PAST_GRACE = ENGAGEMENT_GRACE_MS + 4000;
+
+  await openTracked(page);
+  await page.locator("#broken").click();
+  const t0 = Date.now();
+  await page.waitForTimeout(PAST_GRACE);
+  await flush(page);
+
+  const [b] = await expectBeacons(page, 1);
+  const wall = Date.now() - t0;
+  expect(wall).toBeGreaterThan(ENGAGEMENT_GRACE_MS);
+  // an abandoned but still-open tab is worth one grace period, not its lifetime
+  expect(b.body!.am).toBeLessThan(ENGAGEMENT_GRACE_MS + 1500);
+  expect(b.body!.am).toBeGreaterThan(ENGAGEMENT_GRACE_MS - 1500);
+});
+
+test("typing keeps a page out of idle without recording a single keystroke", async ({ page }) => {
+  test.setTimeout(90_000);
+  const HALF = Math.round(ENGAGEMENT_GRACE_MS * 0.6);
+
+  await openTracked(page);
+  await page.locator("#card-number").click(); // the last mouse interaction there is
+  await page.waitForTimeout(HALF);
+  // one keystroke, well inside the grace period, re-opening it
+  await page.keyboard.type("4");
+  await page.waitForTimeout(HALF);
+  await flush(page);
+
+  const [b] = await expectBeacons(page, 1);
+  // without the keystroke the clock would have run out one grace period after
+  // the click; with it, both stretches count
+  expect(b.body!.am).toBeGreaterThan(2 * HALF - 1500);
+
+  // and it bought that by recording precisely nothing: no new event kind, no
+  // new field, and no trace of the character typed
+  for (const e of b.body!.ev) {
+    expect(KINDS).toContain(e.k);
+    for (const key of Object.keys(e)) expect(EVENT_KEYS).toContain(key);
+  }
+  expect(b.raw).not.toContain('"4"');
+  expect(Object.keys(b.body!).sort()).toEqual(BODY_KEYS);
 });
 
 test("scrolling records scroll events and a max-scroll percentage", async ({ page }) => {

@@ -1,3 +1,4 @@
+import { ENGAGEMENT_GRACE_MS } from "./engagement.ts";
 import { type BurstPoint, rageBurst } from "./rage";
 import { SID_KEY, SID_RE } from "./sid.ts";
 
@@ -89,7 +90,40 @@ import { SID_KEY, SID_RE } from "./sid.ts";
   let seq = 0;
   let total = 0;
   let maxScroll = 0;
-  let lastT = 0; // time of last recorded event = active duration
+  let lastT = 0; // time of the last recorded event = end of the wall-clock span
+
+  // ---------- engaged time ----------
+  // lastT above is wall clock, and wall clock is what the collector chains
+  // episodes on: it says when this pageview stopped being touched. It is also
+  // not how long anyone was here — a tab opened and left alone all afternoon
+  // reports all afternoon.
+  //
+  // So the visitor's actual attention is measured separately, and measured
+  // here rather than inferred later, because only the page knows the two
+  // things that decide it: whether it was on screen at all, and whether the
+  // silence was a still read or an abandoned tab. Time accrues only while the
+  // tab is visible, and only up to ENGAGEMENT_GRACE_MS past the last
+  // interaction.
+  let engaged = 0; // folded ms
+  let mark = performance.now(); // start of the stretch not yet folded in
+  let visible = document.visibilityState === "visible";
+
+  // Close the open stretch: at most the grace period of it, and none of it at
+  // all if the tab was hidden throughout.
+  const fold = () => {
+    const t = performance.now();
+    if (visible) engaged += Math.min(t - mark, ENGAGEMENT_GRACE_MS);
+    mark = t;
+  };
+
+  // What to report right now. Deliberately does not fold: an idle tab has to
+  // report a stable number, and folding on each 20s flush would instead add
+  // another grace period every time. The open stretch is counted once here and
+  // once, identically, by the fold that the next interaction runs.
+  const engagedMs = () =>
+    Math.round(
+      engaged + (visible ? Math.min(performance.now() - mark, ENGAGEMENT_GRACE_MS) : 0),
+    );
 
   const selector = (start: Element): string => {
     const parts: string[] = [];
@@ -121,9 +155,14 @@ import { SID_KEY, SID_RE } from "./sid.ts";
   };
 
   const push = (e: Omit<Ev, "s">) => {
+    // Both clocks are claimed before the cap, not after: past MAX_EVENTS the
+    // pageview stops recording but the visitor is still there, and a duration
+    // frozen at the cap would also cut the episode chain (which measures the
+    // gap to the next pageview from started_at + duration_ms).
+    lastT = e.t;
+    fold();
     if (total >= MAX_EVENTS) return;
     total++;
-    lastT = e.t;
     buf.push({ s: seq++, ...e } as Ev);
     if (buf.length >= BATCH_SIZE) flush();
   };
@@ -158,6 +197,7 @@ import { SID_KEY, SID_RE } from "./sid.ts";
       vh: innerHeight,
       sa: startedAt,
       d: lastT,
+      am: engagedMs(),
       msc: maxScroll,
       ev: events,
     });
@@ -200,6 +240,13 @@ import { SID_KEY, SID_RE } from "./sid.ts";
     { passive: true },
   );
 
+  // Typing is attention, and it is the one kind that records nothing: form
+  // input is never captured, by design and by test. So a keystroke pokes the
+  // engagement clock and does nothing else — no event is pushed, no key, no
+  // target, no count leaves the page. Without it, filling in a form without
+  // touching the mouse reads as an idle tab.
+  addEventListener("keydown", () => fold(), { capture: true, passive: true });
+
   let lastScroll = 0;
   addEventListener(
     "scroll",
@@ -232,6 +279,11 @@ import { SID_KEY, SID_RE } from "./sid.ts";
     total = 0;
     maxScroll = 0;
     lastT = 0;
+    // the route change is itself the interaction that opens the new pageview's
+    // first stretch, so engagement restarts from now rather than carrying the
+    // previous page's unfolded remainder across
+    engaged = 0;
+    mark = performance.now();
     burst = [];
   };
   const hookHistory = (method: "pushState" | "replaceState") => {
@@ -247,7 +299,16 @@ import { SID_KEY, SID_RE } from "./sid.ts";
 
   setInterval(() => flush(), FLUSH_MS);
   addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flush(true);
+    const vis = document.visibilityState === "visible";
+    if (vis !== visible) {
+      // fold first, while `visible` still describes the stretch being closed:
+      // going hidden banks what was watched, coming back starts a fresh
+      // stretch instead of crediting the time the tab spent in the background
+      fold();
+      visible = vis;
+      mark = performance.now();
+    }
+    if (!vis) flush(true);
   });
   addEventListener("pagehide", () => flush(true));
 })();

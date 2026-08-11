@@ -6,7 +6,13 @@ CREATE TABLE IF NOT EXISTS pageviews (
   vw          INTEGER NOT NULL,
   vh          INTEGER NOT NULL,
   started_at  INTEGER NOT NULL,          -- epoch ms
-  duration_ms INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0, -- wall clock to the last event; chains episodes
+  -- Engaged time as the tracker measured it: visible-tab time within the
+  -- grace period of an interaction. Nullable on purpose — NULL means "this
+  -- pageview was recorded by a tracker that did not measure it", which the
+  -- read API answers with a reconstruction, and 0 means "measured, and the
+  -- visitor was never there". A NOT NULL DEFAULT 0 would collapse the two.
+  active_ms   INTEGER,
   max_scroll  INTEGER NOT NULL DEFAULT 0 -- percent 0..100
 );
 

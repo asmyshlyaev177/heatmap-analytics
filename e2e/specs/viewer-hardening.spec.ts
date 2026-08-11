@@ -1,6 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
 import { COLLECTOR, PAGES } from "../../playwright.config";
-import { type ApiFixtures, mockApi, openViewer, resetBeacons, rows, status, tab } from "../helpers";
+import {
+  type ApiFixtures,
+  mockApi,
+  openViewer,
+  resetBeacons,
+  rows,
+  status,
+  tab,
+  timeline,
+  tlSegs,
+} from "../helpers";
 
 // Hardening of the owner-only overlay: everything here is driven by mocked
 // read-API fixtures, because the data the viewer renders arrives from an
@@ -10,11 +20,8 @@ import { type ApiFixtures, mockApi, openViewer, resetBeacons, rows, status, tab 
 const STAGE = 'div[data-hma][style*="z-index: 2147483630"]';
 const CURSOR = 'div[style*="z-index: 2147483645"]';
 const RIPPLE = 'div[style*="z-index: 2147483644"]';
-const TIMELINE = '#__hma-panel > div[style*="border-top"]';
-
 const stage = (page: Page) => page.locator(STAGE);
 const cursor = (page: Page) => page.locator(CURSOR);
-const timeline = (page: Page) => page.locator(TIMELINE);
 
 interface Ev {
   k: string;
@@ -47,6 +54,9 @@ const sess = (o: Record<string, unknown> = {}) => ({
   session_id: "s-1",
   started_at: Date.now() - 5 * 60_000,
   duration_ms: 30_000,
+  active_ms: 30_000,
+  episode: "pv-a",
+  leg: 1,
   vw: 1280,
   vh: 800,
   max_scroll: 50,
@@ -187,7 +197,8 @@ test("a journey of only hostile paths stages nothing and says so", async ({ page
   await expect(status(page)).toHaveText("Refused 4 unsafe recorded paths");
   await expect(stage(page)).toHaveCount(0);
   await expect(cursor(page)).toHaveCount(0);
-  await expect(timeline(page)).toHaveCount(0);
+  // nothing was staged, so the timeline is still in its idle state
+  await expect(tlSegs(page)).toHaveCount(0);
   expect(offOrigin(frames)).toEqual([]);
   expect(offOrigin(reqs)).toEqual([]);
   expect(reqs.filter((u) => u.includes("/api/replay"))).toEqual([]);
@@ -225,7 +236,8 @@ test("a pv id containing selector syntax replays and cleans up", async ({ page }
   await expect(status(page)).toHaveText("Journey finished — 1 page", { timeout: 25_000 });
   await expect(stage(page)).toHaveCount(0);
   await expect(cursor(page)).toHaveCount(0);
-  await expect(timeline(page)).toHaveCount(0);
+  // a finished replay leaves its timeline up; only the panel's height is fixed
+  await expect(timeline(page)).toHaveCount(1);
   expect(errors).toEqual([]);
   expect(
     await page.evaluate(() => (window as unknown as { __rejected: string[] }).__rejected),
@@ -266,7 +278,7 @@ test("clicking a second row while the first is still loading leaves exactly one 
 
   await expect(stage(page)).toHaveCount(1);
   await expect(cursor(page)).toHaveCount(1);
-  await expect(timeline(page)).toHaveCount(1);
+  await expect(tlSegs(page)).not.toHaveCount(0);
   // the survivor is the newer one
   await expect(page.locator(".__hma-active")).toHaveCount(1);
   await expect(rows(page).nth(1)).toHaveClass(/__hma-active/);
@@ -274,7 +286,7 @@ test("clicking a second row while the first is still loading leaves exactly one 
   await tab(page, "replay").click(); // stop
   await expect(stage(page)).toHaveCount(0);
   await expect(cursor(page)).toHaveCount(0);
-  await expect(timeline(page)).toHaveCount(0);
+  await expect(tlSegs(page)).toHaveCount(0);
   await expect(page.locator(".__hma-active")).toHaveCount(0);
   await expect(status(page)).toHaveText("heatmap-analytics");
 });
@@ -318,7 +330,9 @@ test("re-injecting the viewer mid-replay leaves no orphan stage, cursor, loop or
 
   await expect(stage(page)).toHaveCount(0);
   await expect(cursor(page)).toHaveCount(0);
-  await expect(timeline(page)).toHaveCount(0);
+  // exactly one panel, and with it exactly one timeline — in its idle state
+  await expect(timeline(page)).toHaveCount(1);
+  await expect(tlSegs(page)).toHaveCount(0);
   await expect(page.locator("#__hma-panel")).toHaveCount(1);
   expect(await hmaStyles(page)).toBe(1);
   // the orphaned rAF loop is gone, not merely invisible

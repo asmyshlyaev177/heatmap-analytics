@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { collect } from "../src/api.ts";
+import { ENGAGEMENT_GRACE_MS } from "../src/engagement.ts";
 import { D1_MAX_PARAMS, SID, apiUrl, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 
 interface EvRow {
@@ -24,6 +25,7 @@ interface PvRow {
   vh: number;
   started_at: number;
   duration_ms: number;
+  active_ms: number | null;
   max_scroll: number;
 }
 
@@ -258,6 +260,61 @@ test("re-flush upserts the same pageview row: duration and max_scroll only grow"
   const late = pvRow(env.DB);
   assert.equal(late.duration_ms, 12_000, "duration_ms must never go down");
   assert.equal(late.max_scroll, 88, "max_scroll must never go down");
+  env.DB.close();
+});
+
+test("active_ms is stored as measured, grows like duration, and is NULL when unmeasured", async () => {
+  const env = makeEnv();
+
+  // a tracker that measures it
+  await collect(beacon(pageview({ pv: "pv-1", d: 60_000, am: 12_000 })), env as never);
+  assert.equal(pvRow(env.DB).active_ms, 12_000);
+
+  // later flush of the same pageview: engagement only ever grows
+  await collect(beacon(pageview({ pv: "pv-1", d: 90_000, am: 20_000 })), env as never);
+  assert.equal(pvRow(env.DB).active_ms, 20_000);
+  await collect(beacon(pageview({ pv: "pv-1", d: 90_000, am: 3000 })), env as never);
+  assert.equal(pvRow(env.DB).active_ms, 20_000, "a late re-send must not rewind it");
+
+  // a bundle cached from before the measurement existed sends no `am` at all.
+  // NULL is "never measured", which the read API answers with a reconstruction
+  // — it must not be confused with a measured zero.
+  await collect(beacon(pageview({ pv: "pv-old", d: 60_000 })), env as never);
+  assert.equal(pvRow(env.DB, "pv-old").active_ms, null);
+
+  // …and such a beacon arriving late for a pageview already measured must not
+  // wipe the value it has
+  await collect(beacon(pageview({ pv: "pv-1", d: 90_000 })), env as never);
+  assert.equal(pvRow(env.DB).active_ms, 20_000);
+
+  // a measured zero is a real answer and stays one
+  await collect(beacon(pageview({ pv: "pv-zero", d: 0, am: 0 })), env as never);
+  assert.equal(pvRow(env.DB, "pv-zero").active_ms, 0);
+  env.DB.close();
+});
+
+test("active_ms is clamped to what the page could possibly have accrued", async () => {
+  const env = makeEnv();
+
+  // engagement accrues only while the page is open, so it cannot exceed the
+  // span to the last event plus the one grace period that can follow it
+  await collect(beacon(pageview({ pv: "pv-1", d: 10_000, am: 86_400_000 })), env as never);
+  assert.equal(pvRow(env.DB).active_ms, 10_000 + ENGAGEMENT_GRACE_MS);
+
+  // the trailing grace is inside the bound, not clipped by it
+  await collect(beacon(pageview({ pv: "pv-tail", d: 4000, am: 4000 + 9000 })), env as never);
+  assert.equal(pvRow(env.DB, "pv-tail").active_ms, 13_000);
+
+  // negative and non-numeric never reach the column
+  await collect(beacon(pageview({ pv: "pv-neg", d: 5000, am: -60_000 })), env as never);
+  assert.equal(pvRow(env.DB, "pv-neg").active_ms, 0);
+  await collect(beacon(pageview({ pv: "pv-nan", d: 5000, am: "twelve" })), env as never);
+  assert.equal(pvRow(env.DB, "pv-nan").active_ms, 0);
+
+  // a hostile duration cannot buy unbounded engagement either: the clamp is
+  // relative to the same beacon's own claim, so the two stay consistent
+  await collect(beacon(pageview({ pv: "pv-neg-d", d: -1000, am: 999_999 })), env as never);
+  assert.equal(pvRow(env.DB, "pv-neg-d").active_ms, ENGAGEMENT_GRACE_MS);
   env.DB.close();
 });
 

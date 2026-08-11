@@ -1,0 +1,13 @@
+-- schema.sql creates tables IF NOT EXISTS, so it is the shape of a *fresh*
+-- database and cannot alter one that already exists. Migrations bring an
+-- existing database up to that shape; each runs exactly once, by hand, and is
+-- kept afterwards as the record of what changed.
+--
+-- 001: engaged time, measured by the tracker (src/engagement.ts) instead of
+-- inferred from event gaps. Nullable: existing rows keep NULL, meaning "never
+-- measured", and apiSessions reconstructs a floor for them from their events
+-- rather than reporting a confident 0.
+--
+-- Re-running this errors with "duplicate column name: active_ms", which is the
+-- intended outcome — it means the migration already landed.
+ALTER TABLE pageviews ADD COLUMN active_ms INTEGER;

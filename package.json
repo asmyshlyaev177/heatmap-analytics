@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "db:schema": "wrangler d1 execute heatmap-analytics --file=schema.sql --remote",
+    "db:migrate": "wrangler d1 execute heatmap-analytics --remote",
     "db:schema:local": "wrangler d1 execute heatmap-analytics --file=schema.sql",
     "test": "pnpm run test:unit && pnpm run test:e2e",
     "test:unit": "node --test 'test/**/*.test.ts'",

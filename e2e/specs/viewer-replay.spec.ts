@@ -1,5 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
-import { type ApiFixtures, mockApi, openViewer, panel, resetBeacons, rows, status, tab } from "../helpers";
+import {
+  type ApiFixtures,
+  mockApi,
+  openViewer,
+  panel,
+  resetBeacons,
+  rows,
+  status,
+  tab,
+  timeline,
+  tlSegs,
+} from "../helpers";
 
 // Ghost-cursor session replay, driven entirely off mocked read-API fixtures so
 // the recordings are exact. The cursor/ripples/stage carry no ids — the viewer
@@ -7,12 +18,11 @@ import { type ApiFixtures, mockApi, openViewer, panel, resetBeacons, rows, statu
 const STAGE = 'div[data-hma][style*="z-index: 2147483630"]';
 const CURSOR = 'div[style*="z-index: 2147483645"]';
 const RIPPLE = 'div[style*="z-index: 2147483644"]';
-const TIMELINE = '#__hma-panel > div[style*="border-top"]';
+const TIMELINE = "#__hma-timeline";
 
 const stage = (page: Page) => page.locator(STAGE);
 const cursor = (page: Page) => page.locator(CURSOR);
 const ripples = (page: Page) => page.locator(RIPPLE);
-const timeline = (page: Page) => page.locator(TIMELINE);
 
 const FILL = "rgb(59, 79, 216)";
 const CLICK_TICK = "rgb(249, 208, 87)";
@@ -52,6 +62,9 @@ const sess = (o: Record<string, unknown> = {}) => ({
   session_id: "s-1",
   started_at: Date.now() - AGE_MS,
   duration_ms: 30_000,
+  active_ms: 30_000,
+  episode: "pv-a",
+  leg: 1,
   vw: 1280,
   vh: 800,
   max_scroll: 50,
@@ -199,10 +212,21 @@ test("session rows show stats, badges only when earned, and carry their pageview
   await openList(page, {
     sessions: {
       sessions: [
-        sess({ id: "pv-a", duration_ms: 65_000, clicks: 4, rage: 0, pages: 1, max_scroll: 42, events: 12 }),
+        sess({
+          id: "pv-a",
+          // four minutes of open tab, 65s of it actually spent on the page
+          duration_ms: 245_000,
+          active_ms: 65_000,
+          clicks: 4,
+          rage: 0,
+          pages: 1,
+          max_scroll: 42,
+          events: 12,
+        }),
         sess({
           id: "pv-b",
           duration_ms: 30_000,
+          active_ms: 30_000,
           clicks: 2,
           rage: 3,
           pages: 2,
@@ -223,17 +247,67 @@ test("session rows show stats, badges only when earned, and carry their pageview
   await expect(a).toHaveAttribute("data-pv", "pv-a");
   await expect(b).toHaveAttribute("data-pv", "pv-b");
 
+  // ⏱️ is active time: the 245s the tab was open is never the headline number
   await expect(a.locator(".__hma-sel")).toHaveText("⏱️ 1:05 · 🖱️ 4 · ⬇️ 42%");
   await expect(a.locator(".__hma-n")).toHaveText("5m ago");
-  await expect(a).toHaveAttribute("title", "1280×800 · 12 events");
+  // …and the wall clock it came from is still one hover away
+  await expect(a).toHaveAttribute(
+    "title",
+    "visit pv-a · page 1 of 1\nvisitor s-1\n1280×800 · 12 events\n1:05 active of 4:05 on page · 3:00 idle",
+  );
   // rage / multi-page badges are earned, not decorative
   await expect(a).not.toContainText("🔥");
   await expect(a).not.toContainText("🔀");
 
   await expect(b.locator(".__hma-sel")).toHaveText("⏱️ 0:30 · 🖱️ 2 · 🔥 3 · 🔀 2 pages · ⬇️ 88%");
-  await expect(b).toHaveAttribute("title", "390×844 · 7 events");
+  // nothing idle to report when the whole span was active
+  await expect(b).toHaveAttribute(
+    "title",
+    "visit pv-a · page 1 of 2\nvisitor s-1\n390×844 · 7 events\n0:30 active of 0:30 on page",
+  );
 
   await expect(status(page)).toHaveText("2 sessions on /index.html — click one to replay");
+});
+
+test("the row chip labels the visit and is coloured by the visitor", async ({ page }) => {
+  const ALEX = "5cf04132-d9dc-4de1-a64b-b5844bc19929";
+  const OTHER = "0a1b2c3d-1111-2222-3333-444455556666";
+  await openList(page, {
+    sessions: {
+      sessions: [
+        // one visitor, two visits: two pages of the first, then a later one
+        sess({ id: "pv-a", session_id: ALEX, episode: "aaaaaaaa-1111-2222-3333-444444444444", leg: 1, pages: 4, events: 6 }),
+        sess({ id: "pv-b", session_id: ALEX, episode: "aaaaaaaa-1111-2222-3333-444444444444", leg: 3, pages: 4, events: 6 }),
+        sess({ id: "pv-c", session_id: ALEX, episode: "cccccccc-1111-2222-3333-444444444444", leg: 1, events: 6 }),
+        // and a different visitor entirely
+        sess({ id: "pv-d", session_id: OTHER, episode: "dddddddd-1111-2222-3333-444444444444", leg: 1, events: 6 }),
+      ],
+    },
+  });
+
+  const chip = (i: number) => rows(page).nth(i).locator(".__hma-sid");
+  // six characters of the visit key, then this row's leg within it: the shared
+  // prefix groups the journey, the suffix tells one row from the next
+  await expect(chip(0)).toHaveText("aaaaaa·1");
+  await expect(chip(1)).toHaveText("aaaaaa·3"); // same visit as pv-a, third page of it
+  // the same visitor's later visit reads differently — which is the whole point:
+  // a permanent session_id is identical here and could not have told them apart
+  await expect(chip(2)).toHaveText("cccccc·1");
+  await expect(chip(3)).toHaveText("dddddd·1");
+
+  // colour is the visitor, so one person's separate visits still read as related
+  const bg = async (i: number) =>
+    chip(i).evaluate((el) => getComputedStyle(el as HTMLElement).backgroundColor);
+  expect(await bg(0)).toBe(await bg(1));
+  expect(await bg(0)).toBe(await bg(2)); // same visitor, different visit
+  expect(await bg(0)).not.toBe(await bg(3)); // different visitor
+
+  // both full ids stay reachable on the row they label
+  await expect(rows(page).nth(0)).toHaveAttribute(
+    "title",
+    /^visit aaaaaaaa-1111-2222-3333-444444444444 · page 1 of 4$/m,
+  );
+  await expect(rows(page).nth(0)).toHaveAttribute("title", new RegExp(`^visitor ${ALEX}$`, "m"));
 });
 
 test("clicking a row stages an iframe of the recorded path, a ghost cursor and an active-row mark", async ({
@@ -439,7 +513,7 @@ test("the timeline lives in the panel above the status line and marks clicks, ra
     },
   });
   await rows(page).first().click();
-  await expect(timeline(page)).toHaveCount(1);
+  await expect(tlSegs(page)).not.toHaveCount(0); // wait for the replay to draw
 
   const tl = (await tlInfo(page))!;
   expect(tl.insidePanel).toBe(true);
@@ -475,7 +549,7 @@ test("a long idle gap is skipped, reported on the timeline, and finishes far fas
   );
   const t0 = Date.now();
   await rows(page).first().click();
-  await expect(timeline(page)).toHaveCount(1);
+  await expect(tlSegs(page)).not.toHaveCount(0); // wait for the replay to draw
 
   const tl = (await tlInfo(page))!;
   const skipped = tl.segs.filter((s) => s.bg.startsWith("repeating-linear-gradient"));
@@ -514,21 +588,26 @@ test("a two-page journey advances the iframe and reports the leg it is playing",
   await expect(status(page)).toHaveText("Journey finished — 2 pages", { timeout: 20_000 });
 });
 
-test("stopping a replay removes the stage, cursor, timeline and row highlight", async ({ page }) => {
+test("stopping a replay removes the stage, cursor and row highlight, and empties the timeline", async ({
+  page,
+}) => {
   await openList(page, single(moves(40, 400, { sel: "#headline", rx: 0.5, ry: 0.5 })));
 
   await rows(page).first().click();
   await expect(stage(page)).toHaveCount(1);
   await expect(cursor(page)).toHaveCount(1);
-  await expect(timeline(page)).toHaveCount(1);
+  await expect(tlSegs(page)).not.toHaveCount(0);
   await expect(rows(page).first()).toHaveClass(/__hma-active/);
 
   await tab(page, "replay").click(); // re-clicking the mode stops it
   await expect(stage(page)).toHaveCount(0);
   await expect(cursor(page)).toHaveCount(0);
-  await expect(timeline(page)).toHaveCount(0);
   await expect(page.locator(".__hma-active")).toHaveCount(0);
   await expect(status(page)).toHaveText("heatmap-analytics");
+  // the timeline is a fixture: emptied, not removed
+  await expect(timeline(page)).toHaveCount(1);
+  await expect(tlSegs(page)).toHaveCount(0);
+  await expect(timeline(page)).toHaveText("—no replay");
 
   // and the close button tears down the overlay mid-replay
   await tab(page, "replay").click();
@@ -538,5 +617,24 @@ test("stopping a replay removes the stage, cursor, timeline and row highlight", 
   await expect(panel(page)).toHaveCount(0);
   await expect(stage(page)).toHaveCount(0);
   await expect(cursor(page)).toHaveCount(0);
-  await expect(timeline(page)).toHaveCount(0);
+  await expect(timeline(page)).toHaveCount(0); // it goes with the panel it lives in
+});
+
+test("the panel is exactly as tall before, during and after a replay", async ({ page }) => {
+  await openList(page, single(moves(30, 400, { sel: "#headline", rx: 0.5, ry: 0.5 })));
+
+  const height = () => panel(page).evaluate((el) => el.getBoundingClientRect().height);
+  const listed = await height();
+
+  await rows(page).first().click();
+  await expect(stage(page)).toHaveCount(1);
+  expect(await height()).toBe(listed);
+
+  await expect(status(page)).toHaveText("Journey finished — 1 page", { timeout: 20_000 });
+  expect(await height()).toBe(listed);
+
+  // a finished replay keeps its timeline on screen — that is what the height
+  // above is measuring, and it is also worth reading after the fact
+  await expect(tlSegs(page)).not.toHaveCount(0);
+  await expect(timeline(page)).not.toHaveText("—no replay");
 });

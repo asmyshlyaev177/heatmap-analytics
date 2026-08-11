@@ -1,4 +1,4 @@
-import { compressTimeline } from "./timeline";
+import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
 
 // Owner-only overlay: heatmaps + ghost-cursor session replay, rendered on the
 // live page. Loaded via bookmarklet:
@@ -57,8 +57,22 @@ import { compressTimeline } from "./timeline";
     .${PREFIX}-row.${PREFIX}-active .${PREFIX}-n::before{content:"▶ "}
     .${PREFIX}-sel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c5cad4}
     .${PREFIX}-n{color:#7ea2ff;flex-shrink:0}
+    /* the visitor chip: same id, same colour, so one visitor's rows group by eye */
+    #${PREFIX}-panel .${PREFIX}-sid{flex-shrink:0;padding:0 5px;border-radius:4px;
+      font:600 11px/18px ui-monospace,SFMono-Regular,Menlo,monospace}
     select.${PREFIX}-dev{width:100%;margin-bottom:8px;background:#23262e;
       border:1px solid #2a2e37;border-radius:6px;padding:4px}
+    /* The timeline is a fixture of the panel, not something a replay adds and
+       removes: the two rules below are what pin its height, so starting or
+       stopping a replay can never resize the panel under the cursor. The
+       #panel-scoped selectors are deliberate — "#${PREFIX}-panel *" would
+       otherwise out-specify a bare id and reset font and colour. */
+    #${PREFIX}-panel #${PREFIX}-timeline{padding:10px 12px 8px;
+      border-top:1px solid #2a2e37;font:11px/1.4 system-ui,sans-serif;color:#9aa1af}
+    #${PREFIX}-panel #${PREFIX}-track{position:relative;height:8px;border-radius:4px;
+      background:#2a2e37;overflow:hidden;margin-bottom:6px}
+    #${PREFIX}-panel #${PREFIX}-tllabel{display:flex;justify-content:space-between;
+      gap:8px;height:15px;overflow:hidden;white-space:nowrap}
     @keyframes ${PREFIX}-ripple{from{transform:scale(.3);opacity:.9}to{transform:scale(2.4);opacity:0}}
   `;
   document.head.appendChild(style);
@@ -76,6 +90,10 @@ import { compressTimeline } from "./timeline";
       <button data-mode="off" title="Close">✕</button>
     </div>
     <div id="${PREFIX}-body"></div>
+    <div id="${PREFIX}-timeline">
+      <div id="${PREFIX}-track"></div>
+      <div id="${PREFIX}-tllabel"><span id="${PREFIX}-tlleft"></span><span id="${PREFIX}-tlright"></span></div>
+    </div>
     <div id="${PREFIX}-status">heatmap-analytics</div>`;
   document.body.appendChild(panel);
 
@@ -111,6 +129,19 @@ import { compressTimeline } from "./timeline";
   const body = panel.querySelector(`#${PREFIX}-body`) as HTMLElement;
   const status = panel.querySelector(`#${PREFIX}-status`) as HTMLElement;
   const say = (msg: string) => (status.textContent = msg);
+
+  const track = panel.querySelector(`#${PREFIX}-track`) as HTMLElement;
+  const tlLeft = panel.querySelector(`#${PREFIX}-tlleft`) as HTMLElement;
+  const tlRight = panel.querySelector(`#${PREFIX}-tlright`) as HTMLElement;
+  // Emptied when a replay starts and when the mode changes — never when one
+  // ends. A finished journey leaves its shape on screen (where the clicks
+  // were, how much of it was idle), which is worth reading after the fact.
+  const resetTimeline = () => {
+    track.textContent = "";
+    tlLeft.textContent = "—";
+    tlRight.textContent = "no replay";
+  };
+  resetTimeline();
 
   // ---------- heatmap rendering ----------
   let canvas: HTMLCanvasElement | null = null;
@@ -415,8 +446,6 @@ import { compressTimeline } from "./timeline";
     // IDLE_GAP_MS with no recorded activity plays back as IDLE_KEEP_MS, so
     // an open-but-untouched tab doesn't stall the replay. Skipped stretches
     // are marked on the timeline.
-    const IDLE_GAP_MS = 4000;
-    const IDLE_KEEP_MS = 1000;
     interface VEv extends ReplayEv {
       vt: number;
     }
@@ -481,24 +510,9 @@ import { compressTimeline } from "./timeline";
       (s, l) => s + l.skips.reduce((a, k) => a + k.real - IDLE_KEEP_MS, 0),
       0,
     );
-    // lives inside the panel (above the status line) so nothing overlaps it
-    const tl = document.createElement("div");
-    tl.id = `${PREFIX}-timeline`;
-    Object.assign(tl.style, {
-      padding: "10px 12px 8px",
-      borderTop: "1px solid #2a2e37",
-      font: "11px/1.4 system-ui,sans-serif",
-      color: "#9aa1af",
-    });
-    const track = document.createElement("div");
-    Object.assign(track.style, {
-      position: "relative",
-      height: "8px",
-      borderRadius: "4px",
-      background: "#2a2e37",
-      overflow: "hidden",
-      marginBottom: "6px",
-    });
+    // The timeline itself is already in the panel and stays there; a replay
+    // only fills its track in.
+    resetTimeline();
     const seg = (
       left: number,
       width: number,
@@ -542,15 +556,9 @@ import { compressTimeline } from "./timeline";
         }
       }
     }
-    const tlLabel = document.createElement("div");
-    Object.assign(tlLabel.style, { display: "flex", justifyContent: "space-between" });
-    const tlLeft = document.createElement("span");
-    const tlRight = document.createElement("span");
+    tlLeft.textContent = `▶ ${fmtTime(0)}`;
     tlRight.textContent =
       fmtTime(totalV) + (skippedReal > 0 ? ` · ⏭ ${fmtTime(skippedReal)} idle skipped` : "");
-    tlLabel.append(tlLeft, tlRight);
-    tl.append(track, tlLabel);
-    panel.insertBefore(tl, status);
 
     const cursor = document.createElement("div");
     cursor.id = `${PREFIX}-cursor`;
@@ -582,7 +590,6 @@ import { compressTimeline } from "./timeline";
       cancelAnimationFrame(raf);
       cursor.remove();
       stage.remove();
-      tl.remove();
       // a superseded replay tears down only its own nodes: the handle and the
       // row highlight belong to whichever replay is current
       if (replayStop === stop) replayStop = null;
@@ -766,6 +773,26 @@ import { compressTimeline } from "./timeline";
     }
   };
 
+  // The chip reads "which visit, and where in it": a six-character visit key
+  // shared by every row of one journey, then that row's leg within it. Its
+  // colour is the visitor, so a returning person's visits read as related.
+  //
+  // Three identities, because the list is scanned three ways — group the rows
+  // one click replays together, tell one row from the next, spot a returning
+  // visitor — and only the first is served by an id that never changes. The
+  // visitor id alone was the obvious first choice and the wrong one: it never
+  // rotates, so on a site whose owner is also its main visitor every row
+  // carried the same six characters and said nothing at all.
+  //
+  // Six hex characters of a UUID collide at odds no 30-row list will meet; the
+  // full ids are on the row's tooltip.
+  const shortId = (s: string) => s.replace(/-/g, "").slice(0, 6) || "??????";
+  const idHue = (s: string) => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+    return h;
+  };
+
   const showReplayList = async () => {
     say("Loading sessions…");
     const data = await api("sessions");
@@ -774,6 +801,10 @@ import { compressTimeline } from "./timeline";
       session_id: string;
       started_at: number;
       duration_ms: number;
+      active_ms: number;
+      active_estimated: number;
+      episode: string;
+      leg: number;
       vw: number;
       vh: number;
       max_scroll: number;
@@ -790,9 +821,36 @@ import { compressTimeline } from "./timeline";
       const rageBadge = row.rage ? ` · 🔥 ${row.rage}` : "";
       const pagesBadge = row.pages > 1 ? ` · 🔀 ${row.pages} pages` : "";
       div.dataset.pv = row.id;
-      div.title = `${row.vw}×${row.vh} · ${row.events} events`;
-      div.innerHTML = `<span class="${PREFIX}-sel">⏱️ ${fmtTime(row.duration_ms)} · 🖱️ ${row.clicks ?? 0}${rageBadge}${pagesBadge} · ⬇️ ${row.max_scroll}%</span>
-        <span class="${PREFIX}-n">${fmtAge(row.started_at)}</span>`;
+      // ⏱️ is the active time — the wall clock and the idle it drops are on the
+      // tooltip, so the headline number can't quietly become "tab left open".
+      // A "~" marks the rows nobody measured, where it is a floor rebuilt from
+      // event gaps rather than something the page actually observed.
+      const idle = Math.max(0, row.duration_ms - row.active_ms);
+      const est = !!row.active_estimated;
+      div.title =
+        `visit ${row.episode} · page ${row.leg} of ${row.pages}\n` +
+        `visitor ${row.session_id}\n` +
+        `${row.vw}×${row.vh} · ${row.events} events\n` +
+        `${est ? "~" : ""}${fmtTime(row.active_ms)} active of ${fmtTime(row.duration_ms)} on page` +
+        (idle >= 1000 ? ` · ${fmtTime(idle)} idle` : "") +
+        (est ? "\nactive time estimated from event gaps — recorded before it was measured" : "");
+      // both ids arrive from an unauthenticated beacon: they are shape-checked
+      // at the collector, never trusted as markup here.
+      const sid = document.createElement("span");
+      sid.className = `${PREFIX}-sid`;
+      sid.textContent = `${shortId(row.episode ?? "")}·${row.leg ?? 1}`;
+      const hue = idHue(row.session_id ?? "");
+      sid.style.background = `hsl(${hue} 42% 24%)`;
+      sid.style.color = `hsl(${hue} 72% 78%)`;
+      const stats = document.createElement("span");
+      stats.className = `${PREFIX}-sel`;
+      stats.textContent =
+        `⏱️ ${est ? "~" : ""}${fmtTime(row.active_ms)} · 🖱️ ${row.clicks ?? 0}${rageBadge}${pagesBadge}` +
+        ` · ⬇️ ${row.max_scroll}%`;
+      const age = document.createElement("span");
+      age.className = `${PREFIX}-n`;
+      age.textContent = fmtAge(row.started_at);
+      div.append(sid, stats, age);
       div.addEventListener("click", () => {
         stopReplay();
         playSession(row.id, row.session_id).catch((e) => say(String(e)));
@@ -807,6 +865,7 @@ import { compressTimeline } from "./timeline";
   const reset = () => {
     clearCanvas();
     stopReplay();
+    resetTimeline();
     body.innerHTML = "";
     buttons.forEach((b) => b.classList.remove(`${PREFIX}-on`));
   };

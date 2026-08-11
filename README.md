@@ -92,6 +92,45 @@ running `pnpm db:schema`: the schema drops `salts`, and the old collector reads
 it on every ingest, so the reverse order 500s every beacon until the Worker
 lands.
 
+## Time on page is not attention
+
+Each pageview carries two clocks, because one number cannot be both.
+
+`duration_ms` is **wall clock**: the timestamp of the last thing the tracker
+recorded. A tab opened and left alone for four minutes reports four minutes.
+That is exactly what episode chaining needs — it says when the pageview stopped
+being touched — and a lie to show a human, who reads `⏱️ 3:35` as time spent.
+
+`active_ms` is **attention**, and it is measured in the browser rather than
+inferred later. Time accrues only while `document.visibilityState` is
+`"visible"`, and only up to `ENGAGEMENT_GRACE_MS` (15s, `src/engagement.ts`)
+past the last interaction. So a backgrounded tab is worth nothing however long
+it sits, an abandoned but visible one is worth one grace period, and a page
+someone is reading keeps counting through the stillness — including the stretch
+after the last recorded event, which a wall clock throws away.
+
+**Why the page has to be the one measuring.** The obvious alternative is to
+reconstruct it on the server from the gaps between stored events. That was
+tried, and it cannot see the two facts that actually decide the answer: whether
+the tab was on screen at all, and whether a silence was a still read or an
+abandoned tab. Both look identical in the event table. It also has to guess
+short, because with no visibility signal a generous grace period would credit
+backgrounded tabs — so it systematically under-reports real reading while still
+over-reporting tabs nobody was looking at. Measuring in the page needs no guess
+about either.
+
+A keystroke pokes the engagement clock and does nothing else: no event, no key,
+no target, no count leaves the page. Form input is never captured, by design and
+by test — but filling in a form without touching the mouse is not an idle tab.
+
+The column is **nullable on purpose**. `NULL` means "recorded by a tracker that
+did not measure it" — everything written before the change, plus beacons from
+pages still running a bundle cached before it — and `/api/sessions` answers
+those by reconstructing a floor from the event gaps, capped at the short
+`IDLE_GAP_MS` the replay uses, flagged as `active_estimated`, and shown in the
+viewer with a `~`. A measured `0` is a real answer and stays one; a
+`NOT NULL DEFAULT 0` would have collapsed the two.
+
 ## Add to a site
 
 ```html
@@ -153,6 +192,23 @@ viewer falls back to `location.hostname`, which is the same key the tracker
 filed the data under. Append `&site=<SITE>` only to read one site's data while
 standing on a different page.
 
+Each row in the replay list carries a chip reading `4934f7·3` — six characters
+of the **visit** (keyed by the pageview that opened the episode) and this row's
+**leg** within it — tinted by the **visitor**. The shared prefix groups the rows
+one click replays together, the suffix tells one row from the next, and the
+colour links a returning person's separate visits. Legs number over the whole
+journey while the list is filtered to one path, so they arrive non-contiguous
+(1, 3, 5) when a visitor kept coming back to this page. Full ids are on the
+tooltip.
+
+The visitor id alone was the obvious first choice and the wrong one, which is
+worth recording: it never rotates, so on a site whose owner is also its main
+visitor every row carried the same six characters and the chip said nothing. The replay
+timeline is a permanent fixture of the panel rather than something a replay
+adds and removes — starting or stopping one can't resize the panel under the
+cursor, and a finished journey leaves its shape (where the clicks were, how
+much of it was idle) on screen to read afterwards.
+
 Replay positions the cursor **element-first** (recorded selector + relative
 offset resolved against the live page), so it stays accurate across viewport
 sizes and layout changes; raw scaled coordinates are only the fallback for
@@ -175,7 +231,7 @@ All read endpoints require `?t=<VIEWER_TOKEN>`.
 | `POST /collect` | beacon ingest (no auth; optional `ALLOWED_SITES` allowlist) |
 | `GET /api/heatmap?site&path&type=click/move/rage[&vwmin&vwmax]` | bucketed points `{sel, rx, ry, n}` |
 | `GET /api/elements?site&path` | per-element click/hover/rage counts |
-| `GET /api/sessions?site&path` | recent pageviews with click/rage/scroll stats, plus each one's episode size |
+| `GET /api/sessions?site&path` | recent pageviews with click/rage/scroll stats, `active_ms` (+ `active_estimated`) beside the wall-clock `duration_ms`, plus each one's `episode` key, `leg` and size |
 | `GET /api/journey?site&sid[&pv]` | the episode around `pv`, in order — the legs a replay walks |
 | `GET /api/replay?pv=<id>` | ordered event stream for one pageview |
 
@@ -184,13 +240,37 @@ All read endpoints require `?t=<VIEWER_TOKEN>`.
 ```bash
 pnpm build            # bundle tracker/viewer (runs automatically on deploy)
 pnpm deploy           # build + wrangler deploy
-pnpm db:schema        # apply schema.sql to remote D1
+pnpm db:schema        # apply schema.sql to remote D1 (fresh database)
+pnpm db:migrate       # apply one migrations/*.sql file to remote D1:
+                      #   pnpm db:migrate --file=migrations/001-active-ms.sql
 pnpm dev              # wrangler dev (uses .dev.vars for VIEWER_TOKEN)
 pnpm test             # unit tests, then Playwright e2e
 pnpm test:unit        # node:test against a fake D1 (fast, no network)
 pnpm test:e2e         # build + Playwright (real tracker/viewer in Chromium)
 pnpm typecheck        # tsc --noEmit
 ```
+
+### Schema changes
+
+`schema.sql` is the shape of a *fresh* database. Every statement in it is
+`IF NOT EXISTS`, so running it against an existing one is a no-op that cannot
+add a column — which is the point: it must be safe to re-run, and it must never
+silently rewrite live data.
+
+An existing database is brought up to that shape by a numbered file in
+`migrations/`, applied once, by hand:
+
+```bash
+pnpm db:migrate --file=migrations/001-active-ms.sql
+```
+
+Both halves of a change land: the migration for databases that exist, the same
+column in `schema.sql` for ones that do not. Re-running a migration errors on
+the duplicate column, which is the intended signal that it already landed.
+
+Order matters the same way it did for the `salts` removal — apply the migration
+*before* deploying a Worker that writes the new column, or every beacon 500s on
+`no such column` until the migration lands.
 
 ## Budget (D1 free tier)
 
