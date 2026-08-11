@@ -1,0 +1,51 @@
+/* Tailwind source for the dashboard. scripts/build.mjs compiles this with the
+   Tailwind CLI and inlines the result into src/dashboard.html, so the page the
+   Worker serves is still one self-contained document with no external request.
+
+   source(none) plus the two @source lines below: the scanner is pointed at the
+   dashboard's own files rather than left to walk the repository, where the
+   tracker and viewer bundles are full of strings that look like class names. */
+@import "tailwindcss" source(none);
+@source "./dashboard.html";
+@source "./dashboard.tsx";
+
+/* The viewer's palette, as theme tokens — the two surfaces show the same data
+   and should not disagree about what it looks like. Dark only, deliberately:
+   this is a console for reading recordings, not a public page. */
+@theme {
+  --color-bg: #101216;
+  --color-panel: #16181d;
+  --color-panel2: #1b1e25;
+  --color-raised: #23262e;
+  --color-raised2: #2d313b;
+  --color-line: #2a2e37;
+  --color-ink: #e6e8ee;
+  --color-dim: #9aa1af;
+  --color-dim2: #c5cad4;
+  --color-accent: #3b4fd8;
+  --color-accent2: #4a5ce6;
+  --color-accent-ink: #7ea2ff;
+  --color-warn: #ff2d2d;
+  --color-hot: #f9d057;
+}
+
+/* The three controls that repeat in both the shell and the rendered rows. They
+   are named rather than spelled out at every call site so that a button built
+   in dashboard.ts cannot drift from one written in the markup. */
+@layer components {
+  .hma-btn {
+    @apply cursor-pointer rounded-md border border-line bg-raised px-2.5 py-1.5 text-ink
+           transition-colors hover:bg-raised2
+           disabled:cursor-default disabled:opacity-45 disabled:hover:bg-raised;
+  }
+  .hma-btn-primary {
+    @apply border-accent bg-accent text-white hover:bg-accent2 disabled:hover:bg-accent;
+  }
+  .hma-field {
+    @apply min-w-0 rounded-md border border-line bg-panel2 px-2 py-1.5 text-ink;
+  }
+  .hma-btn:focus-visible,
+  .hma-field:focus-visible {
+    @apply outline-2 outline-offset-1 outline-accent-ink;
+  }
+}

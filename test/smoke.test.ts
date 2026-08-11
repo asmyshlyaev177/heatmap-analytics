@@ -8,7 +8,7 @@ test("fake D1 applies the real schema", () => {
   const tables = db
     .rows<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     .map((r) => r.name);
-  assert.deepEqual(tables, ["events", "pageviews"]);
+  assert.deepEqual(tables, ["events", "pageviews", "replay_tickets"]);
   db.close();
 });
 

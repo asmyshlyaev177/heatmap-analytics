@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
-import { ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
+import { SID, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 import type { TestEnv } from "./helpers/fake-d1.ts";
 
 // worker.ts is written for esbuild/wrangler resolution: the two bundles arrive
@@ -25,19 +25,26 @@ registerHooks({
 });
 
 const mod = await import("../src/worker.ts");
-const worker = mod.makeWorker("TRACKER_BUNDLE", "VIEWER_BUNDLE");
+const worker = mod.makeWorker("TRACKER_BUNDLE", "VIEWER_BUNDLE", "DASHBOARD_BUNDLE");
 
 const SOURCE = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
 const TOKEN = "test-token";
 const DAY = 86_400_000;
 
-// name + the query params that endpoint needs to answer 200
+// name + the query params that endpoint needs to answer, and the status it
+// answers with once the token is accepted (200 unless stated)
 const ROUTES = [
   { name: "heatmap", q: "site=testsite&path=%2F" },
   { name: "elements", q: "site=testsite&path=%2F" },
   { name: "sessions", q: "site=testsite&path=%2F" },
+  { name: "replays", q: "" },
+  { name: "sites", q: "" },
   { name: "journey", q: "site=testsite&sid=s1" },
   { name: "replay", q: "pv=pv-1" },
+  // GET /api/ticket describes the ticket it was given. Naming one that does
+  // not exist is a 404 — still the gate below answering, which is what this
+  // table is for.
+  { name: "ticket", q: "tk=0123456789abcdef", ok: 404 },
 ];
 
 const call = (
@@ -63,21 +70,22 @@ const cors = (res: Response) => ({
 const CORS_ON = { origin: "*", methods: "GET, POST, OPTIONS", headers: "Content-Type" };
 
 // A new /api/ endpoint must be listed in ROUTES (so the gate loop covers it)
-// and must be routed below the authorized() check — moving one above it would
+// and must be routed below the authenticate() call — moving one above it would
 // otherwise leave every test green.
-test("every /api/ route sits below the token gate and is covered here", () => {
-  const gate = SOURCE.indexOf("authorized(url, env)");
-  assert.ok(gate > 0, "token gate not found in worker.ts");
+test("every /api/ route sits below the auth gate and is covered here", () => {
+  const gate = SOURCE.indexOf("authenticate(url, env)");
+  assert.ok(gate > 0, "auth gate not found in worker.ts");
   const found = [...SOURCE.matchAll(/"\/api\/([a-z-]+)"/g)];
+  // /api/ticket is routed twice, once per method
   assert.deepEqual(
-    found.map((m) => m[1]).sort(),
+    [...new Set(found.map((m) => m[1]))].sort(),
     ROUTES.map((r) => r.name).sort(),
   );
   for (const m of found)
-    assert.ok((m.index as number) > gate, `/api/${m[1]} is routed before the token gate`);
+    assert.ok((m.index as number) > gate, `/api/${m[1]} is routed before the auth gate`);
 });
 
-for (const { name, q } of ROUTES) {
+for (const { name, q, ok: okStatus = 200 } of ROUTES) {
   test(`/api/${name} requires the viewer token`, async () => {
     const env = makeEnv();
     await send(env, pageview({ ev: [ev("c", 100)] }));
@@ -95,12 +103,71 @@ for (const { name, q } of ROUTES) {
     }
 
     const ok = await call(env, `/api/${name}?${q}&t=${TOKEN}`);
-    assert.equal(ok.status, 200);
+    assert.equal(ok.status, okStatus);
     assert.equal(ok.headers.get("Content-Type"), "application/json");
     assert.deepEqual(cors(ok), CORS_ON);
     env.DB.close();
   });
 }
+
+test("a ticket opens its own recording through the worker, and nothing else", async () => {
+  const env = makeEnv();
+  await send(env, pageview({ pv: "pv-1", ev: [ev("c", 100)] }));
+
+  const minted = await call(env, `/api/ticket?pv=pv-1&t=${TOKEN}`, { method: "POST" });
+  assert.equal(minted.status, 200);
+  const { tk } = (await minted.json()) as { tk: string };
+
+  // the three reads a deep link makes: what am I for, the journey, each leg
+  for (const path of [
+    `/api/ticket?tk=${tk}`,
+    `/api/journey?site=testsite&sid=${SID}&pv=pv-1&tk=${tk}`,
+    `/api/replay?pv=pv-1&tk=${tk}`,
+  ]) {
+    assert.equal((await call(env, path)).status, 200, path);
+  }
+
+  // everything that reads across visitors stays behind the token, so a ticket
+  // loose on a tracked page cannot enumerate the sites or their heatmaps
+  for (const path of [
+    `/api/heatmap?site=testsite&path=%2F&tk=${tk}`,
+    `/api/elements?site=testsite&path=%2F&tk=${tk}`,
+    `/api/sessions?site=testsite&path=%2F&tk=${tk}`,
+    `/api/replays?tk=${tk}`,
+    `/api/sites?tk=${tk}`,
+  ]) {
+    const res = await call(env, path);
+    assert.equal(res.status, 403, path);
+    assert.deepEqual(await res.json(), { error: "forbidden" }, path);
+  }
+
+  // …and a ticket cannot mint a fresh one to outlive itself
+  const again = await call(env, `/api/ticket?pv=pv-1&tk=${tk}`, { method: "POST" });
+  assert.equal(again.status, 403);
+  env.DB.close();
+});
+
+test("minting is a POST, and needs the token", async () => {
+  const env = makeEnv();
+  await send(env, pageview({ pv: "pv-1", ev: [ev("c", 100)] }));
+
+  for (const [label, path] of [
+    ["no token", "/api/ticket?pv=pv-1"],
+    ["wrong token", "/api/ticket?pv=pv-1&t=nope"],
+  ]) {
+    const res = await call(env, path, { method: "POST" });
+    assert.equal(res.status, 401, label);
+  }
+  // a POST to any other /api path is not a mint
+  assert.equal((await call(env, `/api/replays?t=${TOKEN}`, { method: "POST" })).status, 405);
+  // and an unknown pageview mints nothing
+  assert.equal(
+    (await call(env, `/api/ticket?pv=nope&t=${TOKEN}`, { method: "POST" })).status,
+    404,
+  );
+  assert.equal(env.DB.count("replay_tickets"), 0);
+  env.DB.close();
+});
 
 test("an unknown /api path is 404 with a token and 401 without one", async () => {
   const env = makeEnv();
@@ -173,6 +240,23 @@ test("the default export serves each bundle from its own asset", async () => {
   const env = makeEnv();
   assert.equal(await (await call(env, "/tracker.js", {}, mod.default)).text(), "tracker.txt");
   assert.equal(await (await call(env, "/viewer.js", {}, mod.default)).text(), "viewer.txt");
+  assert.equal(await (await call(env, "/dashboard", {}, mod.default)).text(), "dashboard.txt");
+  env.DB.close();
+});
+
+test("/dashboard is an uncacheable, unframeable, unindexed page — and needs no token", async () => {
+  const env = makeEnv();
+  for (const path of ["/dashboard", "/dashboard/"]) {
+    const res = await call(env, path);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get("Content-Type"), "text/html; charset=utf-8", path);
+    assert.equal(res.headers.get("Cache-Control"), "no-cache", path);
+    // it reports on every connected site; none of them may frame it
+    assert.equal(res.headers.get("X-Frame-Options"), "DENY", path);
+    assert.match(res.headers.get("X-Robots-Tag") ?? "", /noindex/, path);
+    // the shell holds no data — the token gate is the API, not the page
+    assert.equal(await res.text(), "DASHBOARD_BUNDLE", path);
+  }
   env.DB.close();
 });
 
@@ -182,7 +266,13 @@ test("the root path is plain-text help", async () => {
   assert.equal(res.status, 200);
   assert.match(res.headers.get("Content-Type") ?? "", /text\/plain/);
   const body = await res.text();
-  for (const frag of ["POST /collect", "GET  /tracker.js", "GET  /viewer.js", "GET  /api/*"])
+  for (const frag of [
+    "POST /collect",
+    "GET  /tracker.js",
+    "GET  /viewer.js",
+    "GET  /dashboard",
+    "GET  /api/*",
+  ])
     assert.ok(body.includes(frag), frag);
   env.DB.close();
 });

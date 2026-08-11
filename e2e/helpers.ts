@@ -150,27 +150,49 @@ export interface ApiFixtures {
   replay?: Record<string, unknown>;
   heatmap?: Record<string, unknown>;
   elements?: unknown;
+  /** GET /api/ticket — what a deep link's ticket resolves to */
+  ticket?: unknown;
+  /** POST /api/ticket — what the dashboard gets back when it mints one */
+  minted?: unknown;
+  replays?: unknown;
+  sites?: unknown;
+  /** endpoint names that must answer 403, i.e. outside a ticket's scope */
+  forbidden?: string[];
+  /** endpoint names that must answer 401, e.g. an expired ticket */
+  expired?: string[];
 }
 
 /**
  * Mock the collector's read API. Keyed per endpoint; `replay` is keyed by pv
- * id, `heatmap` by type (click/move/rage).
+ * id, `heatmap` by type (click/move/rage). `/api/ticket` answers by method:
+ * POST mints, GET resolves.
  */
 export async function mockApi(page: Page, fx: ApiFixtures): Promise<void> {
   await page.route(`${COLLECTOR}/api/**`, async (route: Route) => {
     const url = new URL(route.request().url());
     const name = url.pathname.replace("/api/", "");
-    const json = (data: unknown) =>
+    const json = (data: unknown, status = 200) =>
       route.fulfill({
-        status: 200,
+        status,
         contentType: "application/json",
         headers: { "Access-Control-Allow-Origin": "*" },
         body: JSON.stringify(data),
       });
 
+    if (fx.expired?.includes(name)) return json({ error: "unauthorized" }, 401);
+    if (fx.forbidden?.includes(name)) return json({ error: "forbidden" }, 403);
+
     if (name === "sessions") return json(fx.sessions ?? { sessions: [] });
     if (name === "journey") return json(fx.journey ?? { pageviews: [] });
     if (name === "elements") return json(fx.elements ?? { elements: [] });
+    if (name === "replays") return json(fx.replays ?? { visits: [], total: 0, truncated: false });
+    if (name === "sites") return json(fx.sites ?? { sites: [] });
+    if (name === "ticket") {
+      if (route.request().method() === "POST") {
+        return fx.minted ? json(fx.minted) : json({ error: "not found" }, 404);
+      }
+      return fx.ticket ? json(fx.ticket) : json({ error: "not found" }, 404);
+    }
     if (name === "heatmap") {
       const type = url.searchParams.get("type") ?? "click";
       return json(fx.heatmap?.[type] ?? { points: [] });
@@ -183,22 +205,106 @@ export async function mockApi(page: Page, fx: ApiFixtures): Promise<void> {
   });
 }
 
-/** Inject the real built viewer overlay. */
-export async function openViewer(page: Page, site = "e2e"): Promise<void> {
+/** Every /api/ URL the page requested, in order. */
+export function watchApi(page: Page): string[] {
+  const urls: string[] = [];
+  page.on("request", (req) => {
+    if (req.url().includes("/api/")) urls.push(req.url());
+  });
+  return urls;
+}
+
+/**
+ * Inject the real built viewer overlay — with the owner's token, or with a
+ * deep link's ticket instead when `tk` is given (the credential the tracker's
+ * bootstrap passes).
+ */
+export async function openViewer(
+  page: Page,
+  site = "e2e",
+  { tk }: { tk?: string } = {},
+): Promise<void> {
   await page.evaluate(
-    async ({ collector, site, token }) => {
+    async ({ collector, query }) => {
       await new Promise<void>((resolve, reject) => {
         const s = document.createElement("script");
-        s.src = `${collector}/viewer.js?t=${token}&site=${site}`;
+        s.src = `${collector}/viewer.js?${query}`;
         s.onload = () => resolve();
         s.onerror = () => reject(new Error("viewer failed to load"));
         document.body.appendChild(s);
       });
     },
-    { collector: COLLECTOR, site, token: TOKEN },
+    {
+      collector: COLLECTOR,
+      query: tk ? `tk=${tk}` : `t=${TOKEN}&site=${site}`,
+    },
   );
   await expect(page.locator("#__hma-panel")).toBeVisible();
 }
+
+// ---------- dashboard helpers ----------
+
+/** A replay ticket id shaped the way the tracker's bootstrap and the collector
+ *  both accept: url-safe, 16-64 characters. */
+export const TICKET = "e2e-ticket-0123456789";
+
+/**
+ * Open the built dashboard against mocked reads. The token and the hidden-list
+ * are seeded into localStorage before the page runs, and window.open is stubbed
+ * into `window.__opened` — a replay link must never actually be followed to a
+ * live site from a test.
+ */
+export const DASHBOARD = `${COLLECTOR}/dashboard`;
+
+export async function openDashboard(
+  page: Page,
+  fx: ApiFixtures = {},
+  { token = TOKEN, hide = [] as string[], query = "" } = {},
+): Promise<void> {
+  await mockApi(page, fx);
+  await page.addInitScript(
+    ([tok, hidden]: [string, string[]]) => {
+      try {
+        if (tok) localStorage.setItem("hma_dash_token", tok);
+        // An empty seed leaves whatever the page itself stored, so a spec can
+        // reload and assert that a hidden visitor stayed hidden.
+        if (hidden.length) {
+          localStorage.setItem(
+            "hma_dash_hidden",
+            JSON.stringify(hidden.map((sid) => ({ sid, label: "seeded", at: 0 }))),
+          );
+        }
+      } catch {
+        /* storage blocked — the spec asserting persistence will say so */
+      }
+      const opened: string[] = [];
+      (window as unknown as { __opened: string[] }).__opened = opened;
+      window.open = ((url?: string | URL) => {
+        if (url) opened.push(String(url));
+        return {
+          opener: null,
+          close() {},
+          location: {
+            replace(next: string) {
+              opened.push(next);
+            },
+          },
+        } as unknown as Window;
+      }) as typeof window.open;
+    },
+    [token, hide] as [string, string[]],
+  );
+  await page.goto(DASHBOARD + query);
+}
+
+/** URLs window.open was pointed at, ignoring the blank tab it opens first. */
+export const opened = (page: Page): Promise<string[]> =>
+  page.evaluate(() =>
+    ((window as unknown as { __opened: string[] }).__opened ?? []).filter((u) => /^https?:/.test(u)),
+  );
+
+/** One <tbody> per visit — a visit's expanded legs live inside it. */
+export const visits = (page: Page) => page.locator("#list tbody[data-episode]");
 
 export const panel = (page: Page) => page.locator("#__hma-panel");
 export const status = (page: Page) => page.locator("#__hma-status");

@@ -38,6 +38,40 @@ import { SID_KEY, SID_RE } from "./sid.ts";
   const site = location.hostname;
   if (!endpoint) return;
 
+  // ---------- replay deep link ----------
+  // The dashboard opens <site><path>#__hma=<ticket> to play a recording back
+  // on the page it was recorded on. This is the only thing on that page able
+  // to load the viewer, which is why the bootstrap lives in the tracker rather
+  // than in a bookmarklet the owner has to click.
+  //
+  // Two things happen and then nothing else does. The ticket leaves the
+  // address bar as soon as it has been read — it is a credential, and a URL
+  // that keeps one gets bookmarked and shared. And this page load records
+  // *nothing*: the owner watching a replay is not a visit, and a tracker that
+  // recorded it would file a pageview into the very data being reviewed.
+  //
+  // It sits below the frame guard on purpose: the replay stages the recording
+  // in a same-origin iframe, and an injection that could fire in there would
+  // stack a viewer inside the viewer.
+  const link = /[#&]__hma=([\w-]{16,64})/.exec(location.hash);
+  if (link) {
+    // the viewer mounts its panel on document.body, which an async tracker in
+    // <head> can beat to the parser
+    const boot = () => {
+      const s = document.createElement("script");
+      s.src = `${endpoint}/viewer.js?tk=${link[1]}`;
+      document.body.appendChild(s);
+    };
+    if (document.body) boot();
+    else addEventListener("DOMContentLoaded", boot);
+    try {
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch {
+      /* sandboxed/opaque origin — the hash just stays in the bar */
+    }
+    return;
+  }
+
   const SAMPLE_MS = 150; // pointer move sampling interval
   const SCROLL_MS = 250;
   const FLUSH_MS = 20_000;

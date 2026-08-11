@@ -136,5 +136,13 @@ createServer(async (req, res) => {
     return;
   }
 
+  // The same single document the Worker embeds — styles, script and all — so
+  // the page under test is the built artifact and not a second copy of the
+  // markup that could drift from it.
+  if (pathname === "/dashboard") {
+    await sendFile(res, join(ROOT, "dist", "dashboard", "dashboard.html"), CORS);
+    return;
+  }
+
   res.writeHead(404, { "Content-Type": "text/plain", ...CORS }).end("not found");
 }).listen(COLLECTOR_PORT, () => console.log(`collector http://localhost:${COLLECTOR_PORT}`));

@@ -13,7 +13,10 @@
     "skipLibCheck": true,
     // tests import source with explicit .ts extensions, which is what Node's
     // strip-only type stripping requires at runtime
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    // the dashboard is Preact; the tracker/viewer bundles carry no JSX
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
   },
-  "include": ["src", "test", "e2e", "playwright.config.ts"]
+  "include": ["src", "test", "e2e", "playwright.config.ts", "vite.config.ts"]
 }

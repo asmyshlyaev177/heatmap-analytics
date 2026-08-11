@@ -1,3 +1,4 @@
+import { fmtAge, fmtTime, idHue, shortId } from "./fmt";
 import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
 
 // Owner-only overlay: heatmaps + ghost-cursor session replay, rendered on the
@@ -11,7 +12,14 @@ import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
   const srcUrl = new URL(script.src);
   const endpoint = srcUrl.origin;
   const token = srcUrl.searchParams.get("t") || "";
-  const site = srcUrl.searchParams.get("site") || location.hostname;
+  // A replay deep link boots this from the tracker with a ticket instead of the
+  // token: minutes of validity, one visitor's recordings on one site. The page
+  // it runs on belongs to whatever site was recorded, so the credential that
+  // reaches it has to be the small one.
+  const ticket = srcUrl.searchParams.get("tk") || "";
+  // reassigned once in ticket mode, from the ticket's own scope rather than
+  // from the page — a link must play what it was minted for
+  let site = srcUrl.searchParams.get("site") || location.hostname;
 
   const PREFIX = "__hma";
   // Re-injection: a previous instance may still be replaying, and this one has
@@ -29,8 +37,25 @@ import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
   document.getElementById(`${PREFIX}-canvas`)?.remove(); // pre-data-hma bundles
 
   const api = async (path: string, params: Record<string, string> = {}) => {
-    const qs = new URLSearchParams({ site, path: location.pathname, ...params, t: token });
+    // the credential is spread last, so a caller's params can widen a request
+    // but never restate what authorises it
+    const qs = new URLSearchParams({
+      site,
+      path: location.pathname,
+      ...params,
+      ...(ticket ? { tk: ticket } : { t: token }),
+    });
     const res = await fetch(`${endpoint}/api/${path}?${qs}`);
+    // A deep link's ticket reads one visitor's recordings on one site, so the
+    // panel's other views are still there and still clickable — they just
+    // answer 403. Saying which credential is in play beats "HTTP 403".
+    if (!res.ok && ticket && (res.status === 401 || res.status === 403)) {
+      throw new Error(
+        res.status === 401
+          ? "Replay link expired — open it again from the dashboard"
+          : "This replay link opens its own recording only — load the bookmarklet for heatmaps",
+      );
+    }
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
     return res.json();
   };
@@ -369,18 +394,6 @@ import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
   const stopReplay = () => {
     replayStop?.(); // tears down an established replay, highlight and all
     replayGen++; // …and supersedes one that has not staged itself yet
-  };
-
-  const fmtTime = (ms: number) => {
-    const s = Math.round(ms / 1000);
-    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-  };
-
-  const fmtAge = (ts: number) => {
-    const m = Math.round((Date.now() - ts) / 60_000);
-    if (m < 60) return `${m}m ago`;
-    if (m < 1440) return `${Math.round(m / 60)}h ago`;
-    return `${Math.round(m / 1440)}d ago`;
   };
 
   interface ReplayEv {
@@ -784,15 +797,7 @@ import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
   // rotates, so on a site whose owner is also its main visitor every row
   // carried the same six characters and said nothing at all.
   //
-  // Six hex characters of a UUID collide at odds no 30-row list will meet; the
-  // full ids are on the row's tooltip.
-  const shortId = (s: string) => s.replace(/-/g, "").slice(0, 6) || "??????";
-  const idHue = (s: string) => {
-    let h = 0;
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
-    return h;
-  };
-
+  // shortId/idHue live in src/fmt.ts — the dashboard draws the same chip.
   const showReplayList = async () => {
     say("Loading sessions…");
     const data = await api("sessions");
@@ -872,7 +877,13 @@ import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
 
   // Everything this instance owns, removable from the outside: a later
   // injection calls it so no stage, cursor, rAF loop or stylesheet is orphaned.
+  // Set once and never cleared: anything of this instance's that is still in
+  // flight has to be able to tell that the instance is gone. stopReplay()
+  // cannot answer that — it re-arms replayGen, so a replay staged *after* a
+  // teardown would look current and leave a full-screen stage nobody owns.
+  let torn = false;
   const teardown = () => {
+    torn = true;
     clearCanvas();
     stopReplay();
     panel.remove();
@@ -898,5 +909,27 @@ import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
     });
   }
 
-  say(token ? "Ready — pick a view" : "No token in bookmarklet URL (?t=…)");
+  // A deep link arrives with a ticket and no idea what it is for: the recording
+  // it plays is named by the ticket, not by the URL, so that a link in a
+  // browser history or a chat log is worth nothing once it has expired.
+  // Started after __hmaTeardown is installed, so a re-injection over a running
+  // deep-link replay can still tear the stage down.
+  if (ticket) {
+    say("Opening replay…");
+    // The panel stays whole — the other views are one 403 away and say so.
+    // Lighting the Replay tab is what marks which one is running, and makes
+    // clicking it again stop the replay like any other mode.
+    buttons.find((b) => b.dataset.mode === "replay")?.classList.add(`${PREFIX}-on`);
+    (async () => {
+      const t = (await api("ticket")) as { site: string; pv: string; sid: string };
+      // a bookmarklet loaded over this page while the ticket was resolving has
+      // already torn this instance down; staging a replay now would orphan it
+      if (torn) return;
+      site = t.site || site;
+      stopReplay();
+      await playSession(t.pv, t.sid);
+    })().catch((err) => !torn && say(String(err)));
+  } else {
+    say(token ? "Ready — pick a view" : "No token in bookmarklet URL (?t=…)");
+  }
 })();

@@ -38,6 +38,23 @@ CREATE INDEX IF NOT EXISTS idx_pageviews_started ON pageviews (started_at);
 CREATE INDEX IF NOT EXISTS idx_pageviews_site_session
   ON pageviews (site, session_id, started_at);
 
+-- Replay deep links. The dashboard hands out a link to the *tracked site*, and
+-- the page it lands on is not the owner's origin — so whatever authorises the
+-- replay is readable by every script on that page. A ticket is therefore not
+-- the VIEWER_TOKEN: it is a random id that expires within minutes and can only
+-- read one visitor's recordings on one site.
+CREATE TABLE IF NOT EXISTS replay_tickets (
+  id          TEXT PRIMARY KEY,
+  site        TEXT NOT NULL,
+  pv          TEXT NOT NULL,      -- the pageview the replay starts from
+  session_id  TEXT NOT NULL,      -- everything the ticket may read is this visitor's
+  expires_at  INTEGER NOT NULL    -- epoch ms; checked on use and swept nightly
+);
+-- No index on expires_at on purpose: every read is by primary key, and minutes
+-- of TTL against one human clicking a dashboard means the table holds tens of
+-- rows, so the nightly sweep scans a page or two while an index would cost a
+-- write on every mint.
+
 -- session_id used to be a server-side salted hash of ip+user-agent, rotated
 -- daily out of this table. It is now a random id the browser mints once and
 -- keeps in localStorage, so nothing here has to be derived or rotated. Rows

@@ -1,6 +1,7 @@
 import { build } from "esbuild";
 import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
+import { build as viteBuild } from "vite";
 
 // Where the tracker sends beacons, baked into the bundle so an embedding page
 // needs nothing but the <script> tag. HM_ENDPOINT overrides it at build time:
@@ -24,6 +25,23 @@ for (const name of ["tracker", "viewer"]) {
   copyFileSync(`dist/${name}.js`, `src/generated/${name}.txt`);
   const out = readFileSync(`dist/${name}.js`);
   console.log(`${name}.js  ${out.length} B  (gzip ${gzipSync(out).length} B)`);
+}
+
+// The dashboard ships as one document: the shell in src/dashboard.html with its
+// bundle inlined. One file to serve, one file to keep in sync — and the e2e
+// server can serve the very same dist/dashboard.html the Worker embeds, so the
+// page under test is not a second copy of the markup.
+// The dashboard is a page, so Vite builds it: Tailwind compiles the utilities
+// its markup and its class strings actually use, and vite-plugin-singlefile
+// folds script and styles back into one document (see vite.config.ts). It is
+// served by the Worker and talks to it with relative URLs, so it never reads
+// __HM_ENDPOINT__ — an e2e build with the endpoint empty is just as functional
+// as a production one.
+{
+  await viteBuild();
+  const page = readFileSync("dist/dashboard/dashboard.html");
+  copyFileSync("dist/dashboard/dashboard.html", "src/generated/dashboard.txt");
+  console.log(`dashboard.html  ${page.length} B  (gzip ${gzipSync(page).length} B)`);
 }
 
 // Printed because a bundle built with the wrong endpoint looks identical.

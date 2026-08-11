@@ -1,3 +1,6 @@
 allowBuilds:
+  # a Tailwind CLI dependency, and only `tailwindcss --watch` uses it — the
+  # build here is one-shot, so its native build is not worth running
+  '@parcel/watcher': false
   esbuild: true
   workerd: true

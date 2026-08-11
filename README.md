@@ -3,7 +3,7 @@
 Self-hosted behavior analytics on Cloudflare Workers + D1. Clicks, hover/move
 heatmaps, scroll depth, rage-click detection, and ghost-cursor session replay —
 rendered directly on the live page. No cookies and no third-party scripts; the
-tracker is ~1.5KB gzipped and stores exactly one thing on the device, a random
+tracker is ~1.7KB gzipped and stores exactly one thing on the device, a random
 visitor id in `localStorage`.
 
 Deployed: `https://heatmap-analytics.asmyshlyaev177.workers.dev`
@@ -15,12 +15,13 @@ Deployed: `https://heatmap-analytics.asmyshlyaev177.workers.dev`
 site (any host)          Cloudflare (this repo)
 ┌──────────────┐  beacon  ┌─────────┐   ┌────┐
 │ tracker.js   │ ───────► │ Worker  │ ► │ D1 │
-│ ~1.5KB gzip  │          │ /collect│   └────┘
+│ ~1.7KB gzip  │          │ /collect│   └────┘
 └──────────────┘          └────┬────┘
-                               │ /api/* (token)
-                          ┌────▼────────────┐
-                          │ viewer.js       │  bookmarklet overlay:
-                          │ on the live page│  heatmaps, top elements, replay
+       ▲                       ├──────────────► /dashboard   every site's
+       │                       │ /api/* (token)               visits, filtered
+       │ #__hma=<ticket>  ┌────▼────────────┐                       │
+       └──────────────────│ viewer.js       │  bookmarklet overlay: │
+          "replay this"   │ on the live page│  heatmaps, top, replay◄
                           └─────────────────┘
 ```
 
@@ -37,6 +38,9 @@ site (any host)          Cloudflare (this repo)
   click heatmap (+ red rings on rage points), hover heatmap, top-elements
   list, and session replay (ghost cursor + click ripples + scroll), with a
   device filter (mobile/tablet/desktop).
+- **Dashboard** (`/dashboard`) lists visits across every connected site with a
+  date range, a site filter and a path search, and opens any of them as a
+  replay on the page it was recorded on.
 
 ## Sessions
 
@@ -170,6 +174,15 @@ string (static assets aren't fingerprinted by most frameworks) *and* a manual
 re-sync on every tracker change, and a missed sync ships a stale tracker in
 silence. That went wrong here once already.
 
+React (TanStack Start, in the root document), gated the same way its GA4 tag
+is — `react-horizontal-scrolling-menu.dev` runs it like this:
+
+```tsx
+{import.meta.env.PROD && (
+  <script async src="https://heatmap-analytics.asmyshlyaev177.workers.dev/tracker.js" />
+)}
+```
+
 Astro, gated so `astro dev` and local builds stay out of the data:
 
 ```astro
@@ -181,7 +194,69 @@ Astro, gated so `astro dev` and local builds stay out of the data:
 
 ## View the data
 
-Bookmarklet (token lives in `.dev.vars`, gitignored — never commit it):
+Two surfaces, answering two different questions. The dashboard asks "what
+happened anywhere"; the bookmarklet asks "what happened on the page I am
+standing on", which is the only place a heatmap can be drawn.
+
+### Dashboard
+
+`https://heatmap-analytics.asmyshlyaev177.workers.dev/dashboard`
+
+It asks for the `VIEWER_TOKEN` once and keeps it in that browser's
+localStorage. `?t=<token>` works too and is taken back out of the address bar
+as soon as it is read — a URL that keeps a credential gets bookmarked, pasted
+into a chat and left in a history.
+
+The row is a **visit**: one uninterrupted run of navigation, chained exactly
+the way `/api/journey` chains it (the next page opening under
+`NAV_CHAIN_GAP_MS` after the previous one's last activity). Not the pageview,
+which is a fragment of what someone did, and not the visitor, whose id never
+rotates. A visit of several pages expands into its legs, and any leg replays
+from itself.
+
+A row carries two badges, because it answers two questions. The tinted one is
+the **visitor** — the id that persists, which is what makes a returning person
+visible as one person; it reads `×3` when three of that visitor's visits are on
+screen, and it takes its colour from the same hash the viewer uses, so a
+visitor keeps their colour across both surfaces. The quiet one beside it is the
+**visit**: the key `/api/journey` anchors on and the six characters the viewer
+prints, with a visit's legs numbered `·1`, `·2` against it.
+
+Filters: site, date range (local days, not UTC ones), a path search that
+matches *any* leg of a visit, and a list of visitors to hide. Hiding is a view
+preference stored per device, not a rule on the server: it drops the owner's
+own browser out of the list without deleting a row, changing what `/collect`
+accepts, or touching what the bookmarklet shows on the page itself.
+
+The list is bounded. One call scans at most `REPLAYS_SCAN_CAP` pageviews and
+says so when it hits that ceiling, and the scan reaches one episode window
+*before* the range starts — a visit that began before midnight is still the
+visit its rows belong to, and its first leg is the id a replay has to start
+from.
+
+### Replay deep links
+
+▶ Replay opens the recorded page at `https://<site><path>#__hma=<ticket>`. The
+tracker already on that page sees the fragment, loads the viewer with that
+ticket, and records nothing for that page load — the owner watching a replay is
+not a visit.
+
+The ticket is why this is not just the bookmarklet with extra steps. The page a
+replay runs on belongs to the tracked site, so whatever authorises the read is
+readable by every script that site loads, and sits in its address bar besides.
+So the link never carries `VIEWER_TOKEN`. A ticket is a random id, valid for
+`TICKET_TTL_MS` (10 minutes), that can read **one visitor's recordings on one
+site** and nothing else: `/api/journey` refuses another `sid`, `/api/replay`
+checks the pageview it was handed actually belongs to that visitor, and every
+aggregate endpoint answers 403. Expired tickets are swept by the nightly cron.
+
+The panel that comes up is the whole panel — the heatmap and top-element views
+are there and say what a link cannot reach if you click them. Load the
+bookmarklet on the same page for those.
+
+### Bookmarklet
+
+Token lives in `.dev.vars`, gitignored — never commit it:
 
 ```text
 javascript:(function(){var s=document.createElement('script');s.src='https://heatmap-analytics.asmyshlyaev177.workers.dev/viewer.js?t=<VIEWER_TOKEN>';document.body.appendChild(s)})()
@@ -224,7 +299,9 @@ clickables with `data-hm-replay` to opt in, or any subtree with
 
 ## API
 
-All read endpoints require `?t=<VIEWER_TOKEN>`.
+All read endpoints require `?t=<VIEWER_TOKEN>`. The two marked ⊙ also accept
+`?tk=<ticket>` instead, scoped to that ticket's visitor and site; everything
+else answers 403 to a ticket.
 
 | Endpoint | Returns |
 | --- | --- |
@@ -232,13 +309,17 @@ All read endpoints require `?t=<VIEWER_TOKEN>`.
 | `GET /api/heatmap?site&path&type=click/move/rage[&vwmin&vwmax]` | bucketed points `{sel, rx, ry, n}` |
 | `GET /api/elements?site&path` | per-element click/hover/rage counts |
 | `GET /api/sessions?site&path` | recent pageviews with click/rage/scroll stats, `active_ms` (+ `active_estimated`) beside the wall-clock `duration_ms`, plus each one's `episode` key, `leg` and size |
-| `GET /api/journey?site&sid[&pv]` | the episode around `pv`, in order — the legs a replay walks |
-| `GET /api/replay?pv=<id>` | ordered event stream for one pageview |
+| `GET /api/replays?[site&from&to&q&exclude&limit&offset&empty]` | visits across every site, newest first, with their legs — the dashboard's list |
+| `GET /api/sites?[from&to]` | site keys reporting in the range, with pageview and browser counts |
+| `POST /api/ticket?pv=<id>` | mints a replay ticket for that pageview's visitor and site |
+| `GET /api/ticket?tk=<id>` ⊙ | what the ticket may replay: `{site, pv, sid, expires_at}` |
+| `GET /api/journey?site&sid[&pv]` ⊙ | the episode around `pv`, in order — the legs a replay walks |
+| `GET /api/replay?pv=<id>` ⊙ | ordered event stream for one pageview |
 
 ## Commands
 
 ```bash
-pnpm build            # bundle tracker/viewer (runs automatically on deploy)
+pnpm build            # bundle tracker/viewer + dashboard (runs on deploy)
 pnpm deploy           # build + wrangler deploy
 pnpm db:schema        # apply schema.sql to remote D1 (fresh database)
 pnpm db:migrate       # apply one migrations/*.sql file to remote D1:
@@ -249,6 +330,14 @@ pnpm test:unit        # node:test against a fake D1 (fast, no network)
 pnpm test:e2e         # build + Playwright (real tracker/viewer in Chromium)
 pnpm typecheck        # tsc --noEmit
 ```
+
+The tracker and the viewer are two esbuild IIFE bundles inlined into the Worker
+as text. The dashboard is a page, so it is built like one: Vite resolves it,
+Tailwind compiles the utilities its markup actually uses, Preact renders it, and
+`vite-plugin-singlefile` folds script and styles back into a single document
+(`vite.config.ts`). The Worker serves that document from one text import — no
+second route to keep in step, and no asset that can 404 out from under the page
+after a redeploy.
 
 ### Schema changes
 
@@ -262,15 +351,23 @@ An existing database is brought up to that shape by a numbered file in
 
 ```bash
 pnpm db:migrate --file=migrations/001-active-ms.sql
+pnpm db:migrate --file=migrations/002-replay-tickets.sql
 ```
 
 Both halves of a change land: the migration for databases that exist, the same
-column in `schema.sql` for ones that do not. Re-running a migration errors on
-the duplicate column, which is the intended signal that it already landed.
+statement in `schema.sql` for ones that do not. Re-running 001 errors on the
+duplicate column, which is the intended signal that it already landed; 002 adds
+a whole table, so it is `IF NOT EXISTS` and re-running it is a no-op.
 
 Order matters the same way it did for the `salts` removal — apply the migration
 *before* deploying a Worker that writes the new column, or every beacon 500s on
 `no such column` until the migration lands.
+
+002 is gentler about it: ingest and every token-authenticated read work
+perfectly well without `replay_tickets`. What breaks is minting a replay link
+(a 500), and the tail of the nightly purge — the two retention deletes run
+first, so data still ages out, but the cron ends on an error. Apply it first
+anyway.
 
 ## Budget (D1 free tier)
 
@@ -315,6 +412,11 @@ The fixtures neutralise `navigator.webdriver` (the tracker ignores automated
 browsers by design); the guard itself is covered by a spec that loads with
 `?keep-webdriver=1` and asserts silence.
 
+`e2e/specs/dashboard.spec.ts` drives the built `dist/dashboard/dashboard.html`
+— the same document the Worker embeds, so what is under test is the artifact
+and not a second copy of the markup. `window.open` is stubbed there: a replay
+link must never be followed to a live site from a test.
+
 What the suite protects, beyond the obvious paths: the identity model (one
 `localStorage` key and nothing else touched, the id generated once and reused
 across pageviews and reloads, a corrupted stored value re-minted instead of
@@ -326,6 +428,14 @@ journey windows that keep the requested pageview inside a capped response even
 for a session far past that cap, idle compression, rage detection firing exactly
 once, token-gated reads, and replay's element-anchored cursor staying correct
 across viewport sizes.
+
+For the dashboard and its deep links: visits chained the same way journeys are
+(and never across two sites sharing a visitor id), a visit that straddles the
+start of the range keeping its real first leg, a hidden id that is empty or
+malformed being dropped rather than turned into a `NOT IN` that matches
+nothing, engaged time reported as measured or flagged as a floor, a deep link
+recording nothing on the page it opens, and a ticket refusing every read
+outside the one visitor and site it was minted for.
 
 `e2e/test-page.html` predates the suite and is kept for manual poking against
 the deployed Worker: open it, interact, then check

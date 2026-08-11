@@ -18,9 +18,16 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.2.0",
     "esbuild": "^0.25.5",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.9.2",
+    "vite": "^8.2.1",
+    "vite-plugin-singlefile": "^2.3.3",
     "wrangler": "^4.27.0"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
   }
 }
