@@ -1,6 +1,21 @@
+# This is not a workspace. The file exists to allow two native builds, and
+# `packages` is here only because pnpm 9 — which is what the Cloudflare build
+# image actually runs, whatever its log line claims — refuses to read the file
+# without it. Deploys failed on "packages field missing or empty" until it was.
+packages:
+  - .
+
+# The same allowlist twice, because the key was renamed. pnpm 11+ reads
+# allowBuilds; pnpm 9 and 10 read onlyBuiltDependencies and ignore the other.
+# Drop the old pair once the build image is past pnpm 10.
+#
+# @parcel/watcher is a Tailwind CLI dependency that only `tailwindcss --watch`
+# uses, so its native build is not worth running for a one-shot build. It is
+# absent from onlyBuiltDependencies for the same reason it is false below.
 allowBuilds:
-  # a Tailwind CLI dependency, and only `tailwindcss --watch` uses it — the
-  # build here is one-shot, so its native build is not worth running
-  '@parcel/watcher': false
+  "@parcel/watcher": false
   esbuild: true
   workerd: true
+onlyBuiltDependencies:
+  - esbuild
+  - workerd
