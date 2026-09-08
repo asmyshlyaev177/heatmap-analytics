@@ -6,15 +6,16 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:schema": "wrangler d1 execute heatmap-analytics --file=schema.sql --remote",
-    "db:migrate": "wrangler d1 execute heatmap-analytics --remote",
-    "db:schema:local": "wrangler d1 execute heatmap-analytics --file=schema.sql",
+    "deploy": "wrangler d1 migrations apply heatmap-analytics --remote && wrangler deploy",
+    "db:schema": "wrangler d1 execute heatmap-analytics --file=schema.sql --remote && pnpm db:baseline --remote",
+    "db:migrate": "wrangler d1 migrations apply heatmap-analytics --remote",
+    "db:schema:local": "wrangler d1 execute heatmap-analytics --file=schema.sql && pnpm db:baseline",
     "test": "pnpm run test:unit && pnpm run test:e2e",
     "test:unit": "node --test 'test/**/*.test.ts'",
     "test:e2e": "HM_ENDPOINT= pnpm run build && playwright test",
     "test:e2e:ui": "HM_ENDPOINT= pnpm run build && playwright test --ui",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:baseline": "node scripts/db-baseline.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

@@ -1,30 +1,57 @@
 # Schema changes
 
-`schema.sql` is the shape of a *fresh* database. Every statement in it is
-`IF NOT EXISTS`, so running it against an existing one is a no-op that cannot add
-a column — the point being that it must be safe to re-run and must never silently
-rewrite live data.
+`pnpm deploy` applies pending migrations before it deploys:
 
-An existing database is brought up to that shape by a numbered file here, applied
-once, by hand:
-
-```bash
-pnpm db:migrate --file=migrations/001-active-ms.sql
-pnpm db:migrate --file=migrations/002-replay-tickets.sql
-pnpm db:migrate --file=migrations/003-country.sql
+```jsonc
+"deploy": "wrangler d1 migrations apply heatmap-analytics --remote && wrangler deploy"
 ```
 
-Both halves of a change land: the migration for databases that exist, the same
-statement in `schema.sql` for ones that do not.
+That ordering is the whole point. A Worker deployed ahead of its migration 500s
+every beacon on `no such column` until the migration lands — which is exactly
+what happened when `003-country.sql` shipped, and `&&` is what stops it
+happening again. Wrangler tracks what it has run in a `d1_migrations` table, so
+a deploy with nothing pending prints "No migrations to apply" and moves on.
+It also captures a backup first and rolls a failed migration back.
 
-**Apply the migration before deploying a Worker that writes the new column**, or
-every beacon 500s on `no such column` until it lands. This is the same ordering
-the `salts` removal needed, in reverse.
+## Adding one
+
+Both halves of a change land, and they are the same edit:
+
+1. a numbered file here — `004-thing.sql`, sorting after the last one
+2. the same statement in `schema.sql`, which is the shape of a *fresh* database
+
+`schema.sql` is what `test/helpers/fake-d1.ts` builds the unit suite's database
+from, so a column the code reads but `schema.sql` never creates fails
+`pnpm test:unit` rather than reaching production.
+
+Everything in `schema.sql` is `IF NOT EXISTS`: running it against an existing
+database must be a no-op, never a silent rewrite of live data. That is also why
+it cannot add a column, and why this folder exists.
+
+## Bootstrapping a fresh database
+
+```bash
+pnpm db:schema        # schema.sql, then mark every migration applied
+```
+
+The second half matters. `schema.sql` already produces the current shape, so
+every migration is satisfied the moment it exists — running `001` against it
+would fail on a duplicate column. `wrangler d1 migrations apply` has no "mark
+applied", so `scripts/db-baseline.mjs` writes the rows it would have written,
+reading the names out of this directory rather than a list it could forget.
+
+`pnpm db:baseline --remote` runs that half alone. It is idempotent
+(`INSERT OR IGNORE`), and it is what was used once to adopt this scheme on a
+database whose three migrations had already been applied by hand.
 
 ## The files
 
 | | |
 | --- | --- |
-| `001-active-ms.sql` | engaged time, measured rather than inferred. Re-running errors on the duplicate column — the intended signal that it already landed. |
-| `002-replay-tickets.sql` | a whole table, so `IF NOT EXISTS` and safe to re-run. Gentler about ordering: ingest and every token-authenticated read work without it. What breaks is minting a replay link (a 500) and the tail of the nightly purge — the two retention deletes run first, so data still ages out, but the cron ends on an error. Apply it first anyway. |
-| `003-country.sql` | the visitor's country. Errors on the duplicate column, same as 001. |
+| `001-active-ms.sql` | engaged time, measured rather than inferred. |
+| `002-replay-tickets.sql` | a whole table, so `IF NOT EXISTS`. Gentler about ordering than the others: ingest and every token-authenticated read work without it. What breaks is minting a replay link (a 500) and the tail of the nightly purge — the two retention deletes run first, so data still ages out, but the cron ends on an error. |
+| `003-country.sql` | the visitor's country. |
+
+Re-running `001` or `003` by hand errors on the duplicate column, which is the
+intended signal that it already landed. `wrangler d1 migrations apply` never
+re-runs one at all.

@@ -142,9 +142,9 @@ All read endpoints require `?t=<VIEWER_TOKEN>`. The three marked ⊙ also accept
 
 ```bash
 pnpm build            # bundle tracker/viewer + dashboard (runs on deploy)
-pnpm deploy           # build + wrangler deploy
-pnpm db:schema        # apply schema.sql to remote D1 (fresh database)
-pnpm db:migrate       # apply one migrations/*.sql file — see migrations/README.md
+pnpm deploy           # pending migrations, then build + wrangler deploy
+pnpm db:schema        # bootstrap a fresh remote D1 — see migrations/README.md
+pnpm db:migrate       # pending migrations only, without deploying
 pnpm dev              # wrangler dev (uses .dev.vars for VIEWER_TOKEN)
 pnpm test             # unit tests, then Playwright e2e
 pnpm test:unit        # node:test against a fake D1 (fast, no network)
@@ -179,7 +179,7 @@ src/            four surfaces + what they share  → src/CLAUDE.md
   worker.ts       routing
 migrations/     one numbered file per change     → migrations/README.md
 test/, e2e/     unit and end-to-end suites       → test/CLAUDE.md
-scripts/        build.mjs
+scripts/        build.mjs, db-baseline.mjs
 schema.sql      the shape of a fresh database
 ```
 
