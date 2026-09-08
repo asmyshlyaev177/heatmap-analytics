@@ -2,8 +2,8 @@
 // navigation — because a session id identifies a person and never rotates.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { REPLAYS_SCAN_CAP, apiReplays, apiSites, buildVisits } from "../src/api.ts";
-import { IDLE_GAP_MS } from "../src/timeline.ts";
+import { REPLAYS_SCAN_CAP, apiReplays, apiSites, buildVisits } from "../src/api/index.ts";
+import { IDLE_GAP_MS } from "../src/shared/index.ts";
 import { apiUrl, makeEnv } from "./helpers/fake-d1.ts";
 import type { TestEnv } from "./helpers/fake-d1.ts";
 

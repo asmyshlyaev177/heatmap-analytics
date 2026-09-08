@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collect, purge } from "../src/api.ts";
+import { collect, purge } from "../src/api/index.ts";
 import { FakeD1, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 import type { TestEnv } from "./helpers/fake-d1.ts";
 

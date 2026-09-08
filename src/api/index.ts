@@ -1,8 +1,6 @@
 // All collector/API logic, separated from worker.ts so tests can import it
 // without the bundled tracker/viewer text assets.
-import { ENGAGEMENT_GRACE_MS } from "./engagement.ts";
-import { SID_RE } from "./sid.ts";
-import { IDLE_GAP_MS } from "./timeline.ts";
+import { ENGAGEMENT_GRACE_MS, IDLE_GAP_MS, SID_RE } from "../shared/index.ts";
 
 export interface Env {
   DB: D1Database;

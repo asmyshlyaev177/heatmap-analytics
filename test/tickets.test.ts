@@ -13,8 +13,8 @@ import {
   authenticate,
   collect,
   purge,
-} from "../src/api.ts";
-import type { Auth } from "../src/api.ts";
+} from "../src/api/index.ts";
+import type { Auth } from "../src/api/index.ts";
 import { apiUrl, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 import type { TestEnv } from "./helpers/fake-d1.ts";
 

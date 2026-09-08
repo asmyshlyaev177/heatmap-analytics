@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collect } from "../src/api.ts";
-import { ENGAGEMENT_GRACE_MS } from "../src/engagement.ts";
+import { collect } from "../src/api/index.ts";
+import { ENGAGEMENT_GRACE_MS } from "../src/shared/index.ts";
 import { D1_MAX_PARAMS, SID, apiUrl, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 
 interface EvRow {

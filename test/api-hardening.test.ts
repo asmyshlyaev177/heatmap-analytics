@@ -9,7 +9,7 @@ import {
   apiSessions,
   collect,
   purge,
-} from "../src/api.ts";
+} from "../src/api/index.ts";
 import { D1_MAX_PARAMS, apiUrl, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 import type { TestEnv } from "./helpers/fake-d1.ts";
 

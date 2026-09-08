@@ -5,14 +5,20 @@ import { test } from "node:test";
 import { SID, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 import type { TestEnv } from "./helpers/fake-d1.ts";
 
-// worker.ts is written for esbuild/wrangler resolution: the two bundles arrive
-// as *.txt text imports and its own modules carry no extension. Node can do
-// neither, so both are mapped here — the .txt stubs resolve to their basename,
-// which is what the wiring assertions below match on.
+// worker.ts is written for esbuild/wrangler resolution: the bundles arrive as
+// *.txt text imports and its own modules carry no extension, resolving through
+// a folder's index. Node does none of that, so all three are mapped here — the
+// .txt stubs to their basename, which the wiring assertions below match on.
 registerHooks({
   resolve(spec, ctx, next) {
     if (spec.endsWith(".txt")) return { url: `hma-text:${spec}`, shortCircuit: true };
-    if (/^\.{1,2}\//.test(spec) && !/\.[a-z]+$/.test(spec)) return next(`${spec}.ts`, ctx);
+    if (/^\.{1,2}\//.test(spec) && !/\.[a-z]+$/.test(spec)) {
+      try {
+        return next(`${spec}.ts`, ctx);
+      } catch {
+        return next(`${spec}/index.ts`, ctx);
+      }
+    }
     return next(spec, ctx);
   },
   load(url, ctx, next) {

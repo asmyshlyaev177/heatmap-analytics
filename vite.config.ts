@@ -3,26 +3,20 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
-// The dashboard is an ordinary HTML page, so it is built by an ordinary web
-// build: Vite resolves the <link> and <script> in src/dashboard.html, Tailwind
-// compiles the utilities those files actually use, and vite-plugin-singlefile
-// folds the results back into the document.
+// An ordinary web build for an ordinary page: Vite resolves the <link> and
+// <script> in dashboard.html, Tailwind compiles the utilities they use, and
+// vite-plugin-singlefile folds the result back into the document. One document
+// is the point — the Worker serves it from a single text import, so there is no
+// second route to keep in step and no asset that can 404 after a redeploy.
 //
-// One document is the point. The Worker serves it from a single text import
-// (src/generated/dashboard.txt, written by scripts/build.mjs), which means no
-// second route to keep in step and no asset that can 404 out from under the
-// page after a redeploy.
+// The tracker and viewer stay on esbuild: not pages, two IIFE bundles.
 //
-// The tracker and the viewer stay on esbuild: they are not pages, they are two
-// IIFE bundles inlined into the Worker, and their build is already a one-liner
-// per bundle in scripts/build.mjs.
-// fileURLToPath, not URL.pathname: a URL path is percent-encoded, so a clone
-// into a directory with a space in it would hand Vite "…/hma%20space/src" and
-// fail to resolve the entry — and `wrangler deploy` runs this same script.
+// fileURLToPath, not URL.pathname: a percent-encoded path would hand Vite
+// "…/hma%20space/src" from a clone in a directory with a space in it.
 const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
 export default defineConfig({
-  root: here("src/"),
+  root: here("src/dashboard/"),
   publicDir: false,
   plugins: [tailwindcss(), viteSingleFile()],
   esbuild: { jsx: "automatic", jsxImportSource: "preact" },
@@ -30,7 +24,7 @@ export default defineConfig({
     outDir: here("dist/dashboard/"),
     emptyOutDir: true,
     target: "es2020",
-    rollupOptions: { input: here("src/dashboard.html") },
+    rollupOptions: { input: here("src/dashboard/dashboard.html") },
   },
   logLevel: "warn",
 });

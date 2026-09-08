@@ -1,5 +1,4 @@
-import { fmtAge, fmtTime, idHue, shortId } from "./fmt";
-import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline } from "./timeline";
+import { IDLE_GAP_MS, IDLE_KEEP_MS, compressTimeline, fmtAge, fmtTime, idHue, shortId } from "../shared";
 
 // Owner-only overlay: heatmaps + ghost-cursor session replay, rendered on the
 // live page. Loaded via bookmarklet:

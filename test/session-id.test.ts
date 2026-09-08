@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { collect, sessionId } from "../src/api.ts";
-import { SID_KEY, SID_RE } from "../src/sid.ts";
+import { collect, sessionId } from "../src/api/index.ts";
+import { SID_KEY, SID_RE } from "../src/shared/index.ts";
 import { SID, beacon, ev, makeEnv, pageview, type TestEnv } from "./helpers/fake-d1.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -77,14 +77,14 @@ test("the localStorage key is pinned: renaming it orphans every stored id", () =
 });
 
 test("both ends validate against one shared shape, not two copies of it", async () => {
-  // The tracker reads SID_RE out of src/sid.ts too. If it ever inlined its own
+  // The tracker reads SID_RE out of src/shared/sid.ts too. If it ever inlined its own
   // copy again, an id the tracker forwards could be one the collector refuses —
   // and a refused id becomes a throwaway, so journeys would break in silence.
-  const tracker = await readFile(new URL("../src/tracker.ts", import.meta.url), "utf8");
+  const tracker = await readFile(new URL("../src/tracker/index.ts", import.meta.url), "utf8");
   assert.match(tracker, /SID_RE\.test\(/, "the tracker must use the shared regex");
   assert.ok(
     !/\{8,\s*64\}/.test(tracker),
-    "the tracker must not restate the id shape — import it from src/sid.ts",
+    "the tracker must not restate the id shape — import it from src/shared/sid.ts",
   );
 });
 

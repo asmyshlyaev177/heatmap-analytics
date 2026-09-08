@@ -1,6 +1,5 @@
-import { ENGAGEMENT_GRACE_MS } from "./engagement.ts";
+import { ENGAGEMENT_GRACE_MS, SID_KEY, SID_RE } from "../shared";
 import { type BurstPoint, rageBurst } from "./rage";
-import { SID_KEY, SID_RE } from "./sid.ts";
 
 // Behavior tracker: clicks, sampled pointer moves, scroll. The only thing it
 // stores on the device is one random visitor id in localStorage; no cookies, no

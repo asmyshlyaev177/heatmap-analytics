@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { apiElements, apiHeatmap, apiReplay, authorized, collect } from "../src/api.ts";
+import { apiElements, apiHeatmap, apiReplay, authorized, collect } from "../src/api/index.ts";
 import { SID, apiUrl, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 
 type Env = ReturnType<typeof makeEnv>;

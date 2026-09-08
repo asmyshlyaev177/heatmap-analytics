@@ -1,13 +1,13 @@
-/* Tailwind source for the dashboard. scripts/build.mjs compiles this with the
-   Tailwind CLI and inlines the result into src/dashboard.html, so the page the
-   Worker serves is still one self-contained document with no external request.
+/* Tailwind source for the dashboard. vite.config.ts compiles it and
+   vite-plugin-singlefile inlines the result, so the page the Worker serves is
+   one self-contained document with no external request.
 
    source(none) plus the two @source lines below: the scanner is pointed at the
    dashboard's own files rather than left to walk the repository, where the
    tracker and viewer bundles are full of strings that look like class names. */
 @import "tailwindcss" source(none);
 @source "./dashboard.html";
-@source "./dashboard.tsx";
+@source "./index.tsx";
 
 /* The viewer's palette, as theme tokens — the two surfaces show the same data
    and should not disagree about what it looks like. Dark only, deliberately:

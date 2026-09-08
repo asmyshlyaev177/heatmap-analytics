@@ -1,6 +1,6 @@
 import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { fmtAge, fmtTime, idHue, shortId } from "./fmt";
+import { fmtAge, fmtTime, idHue, shortId } from "../shared";
 
 // The owner's console: every visit on every connected site, and one click to
 // replay it on the page it was recorded on. Served by the Worker, so every

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collect } from "../src/api.ts";
+import { collect } from "../src/api/index.ts";
 import { FakeD1, beacon, ev, makeEnv, pageview } from "./helpers/fake-d1.ts";
 
 test("fake D1 applies the real schema", () => {

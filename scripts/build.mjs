@@ -14,7 +14,7 @@ mkdirSync("dist", { recursive: true });
 
 for (const name of ["tracker", "viewer"]) {
   await build({
-    entryPoints: [`src/${name}.ts`],
+    entryPoints: [`src/${name}/index.ts`],
     bundle: true,
     minify: true,
     format: "iife",
@@ -27,16 +27,10 @@ for (const name of ["tracker", "viewer"]) {
   console.log(`${name}.js  ${out.length} B  (gzip ${gzipSync(out).length} B)`);
 }
 
-// The dashboard ships as one document: the shell in src/dashboard.html with its
-// bundle inlined. One file to serve, one file to keep in sync — and the e2e
-// server can serve the very same dist/dashboard.html the Worker embeds, so the
-// page under test is not a second copy of the markup.
-// The dashboard is a page, so Vite builds it: Tailwind compiles the utilities
-// its markup and its class strings actually use, and vite-plugin-singlefile
-// folds script and styles back into one document (see vite.config.ts). It is
-// served by the Worker and talks to it with relative URLs, so it never reads
-// __HM_ENDPOINT__ — an e2e build with the endpoint empty is just as functional
-// as a production one.
+// The dashboard is a page, so Vite builds it and vite-plugin-singlefile folds
+// script and styles into one document (see vite.config.ts). One file to serve,
+// and the e2e server serves the very same one the Worker embeds. It talks to
+// the Worker over relative URLs, so it never reads __HM_ENDPOINT__.
 {
   await viteBuild();
   const page = readFileSync("dist/dashboard/dashboard.html");

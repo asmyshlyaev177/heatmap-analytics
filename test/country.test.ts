@@ -2,7 +2,7 @@
 // read or stored is asserted in collect.test.ts and holds with this column.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { apiReplays, collect, country } from "../src/api.ts";
+import { apiReplays, collect, country } from "../src/api/index.ts";
 import { apiUrl, beacon, makeEnv, pageview } from "./helpers/fake-d1.ts";
 
 const HOUR = 3_600_000;

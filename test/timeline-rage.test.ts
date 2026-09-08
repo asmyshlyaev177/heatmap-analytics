@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { RAGE_N, rageBurst } from "../src/rage.ts";
-import { compressTimeline } from "../src/timeline.ts";
+import { RAGE_N, rageBurst } from "../src/tracker/rage.ts";
+import { compressTimeline } from "../src/shared/index.ts";
 
 type Ev = {
   t: number;

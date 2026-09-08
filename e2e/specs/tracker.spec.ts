@@ -14,8 +14,7 @@ import {
 } from "../helpers";
 // imported, not restated: the spec asserts the real contract, so a change to
 // either end has to keep passing here rather than quietly matching a stale copy
-import { SID_KEY, SID_RE } from "../../src/sid";
-import { ENGAGEMENT_GRACE_MS } from "../../src/engagement";
+import { ENGAGEMENT_GRACE_MS, SID_KEY, SID_RE } from "../../src/shared";
 
 const KINDS = ["c", "m", "s", "r"];
 const EVENT_KEYS = ["el", "k", "rx", "ry", "s", "t", "x", "y"];

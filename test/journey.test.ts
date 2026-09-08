@@ -2,8 +2,8 @@
 // reconstructed by chaining pageviews whose gaps look like real navigations.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { NAV_CHAIN_GAP_MS, apiJourney, apiSessions, episodeAround } from "../src/api.ts";
-import { IDLE_GAP_MS } from "../src/timeline.ts";
+import { NAV_CHAIN_GAP_MS, apiJourney, apiSessions, episodeAround } from "../src/api/index.ts";
+import { IDLE_GAP_MS } from "../src/shared/index.ts";
 import { apiUrl, makeEnv, type TestEnv } from "./helpers/fake-d1.ts";
 
 const T = 1_700_000_000_000;
