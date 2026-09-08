@@ -1,6 +1,5 @@
-// The dashboard's list. Its unit is the *visit* — one uninterrupted run of
-// navigation — because a session id identifies a person and never rotates, and
-// a pageview is only ever part of what someone did.
+// The dashboard's list. Its unit is the visit — one uninterrupted run of
+// navigation — because a session id identifies a person and never rotates.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { REPLAYS_SCAN_CAP, apiReplays, apiSites, buildVisits } from "../src/api.ts";
@@ -20,14 +19,15 @@ interface PvSpec {
   path?: string;
   am?: number | null;
   msc?: number;
+  country?: string | null;
   /** [kind, t] pairs, seq assigned in order */
   ev?: [string, number][];
 }
 
 async function insert(env: TestEnv, spec: PvSpec): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO pageviews (id, session_id, site, path, vw, vh, started_at, duration_ms, active_ms, max_scroll)
-     VALUES (?1, ?2, ?3, ?4, 1440, 900, ?5, ?6, ?7, ?8)`,
+    `INSERT INTO pageviews (id, session_id, site, path, vw, vh, started_at, duration_ms, active_ms, max_scroll, country)
+     VALUES (?1, ?2, ?3, ?4, 1440, 900, ?5, ?6, ?7, ?8, ?9)`,
   )
     .bind(
       spec.id,
@@ -38,6 +38,7 @@ async function insert(env: TestEnv, spec: PvSpec): Promise<void> {
       spec.d ?? 1000,
       spec.am ?? null,
       spec.msc ?? 0,
+      spec.country ?? null,
     )
     .run();
   let seq = 0;
@@ -65,6 +66,7 @@ interface VisitRow {
   rage: number;
   events: number;
   max_scroll: number;
+  country: string | null;
   legs: { id: string; path: string; clicks: number; rage: number; events: number; active_ms: number; active_estimated: number }[];
 }
 
@@ -133,6 +135,7 @@ test("buildVisits sorts newest first and breaks ties on the id", () => {
     vw: 0,
     vh: 0,
     max_scroll: 0,
+    country: null,
   });
   // same millisecond, different visitors: an unstable order makes a paginated
   // list repeat rows and skip others

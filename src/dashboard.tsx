@@ -2,16 +2,10 @@ import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { fmtAge, fmtTime, idHue, shortId } from "./fmt";
 
-// The owner's console: every visit on every connected site, filtered by date,
-// minus the visitors being hidden — and a way to open any of them as a replay
-// on the page it was recorded on.
-//
-// Served by the Worker itself, so every request is same-origin and relative: no
-// endpoint is baked in, and the token never leaves this origin.
-//
-// Preact renders everything below, which is also what keeps the recorded data
-// safe to show: site keys and paths arrive from an unauthenticated beacon, and
-// JSX children are text, never markup.
+// The owner's console: every visit on every connected site, and one click to
+// replay it on the page it was recorded on. Served by the Worker, so every
+// request is same-origin and the token never leaves this origin. Preact is also
+// what keeps beacon-supplied site keys and paths safe: children are text.
 
 const TOKEN_KEY = "hma_dash_token";
 const HIDDEN_KEY = "hma_dash_hidden";
@@ -31,6 +25,7 @@ export interface Leg {
   rage: number;
   events: number;
   max_scroll: number;
+  country: string | null;
 }
 
 export interface Visit {
@@ -48,6 +43,7 @@ export interface Visit {
   rage: number;
   events: number;
   max_scroll: number;
+  country: string | null;
   legs: Leg[];
 }
 
@@ -92,9 +88,8 @@ const store = {
   },
 };
 
-// ?t=<token> is accepted once and then taken out of the address bar: a
-// dashboard URL that carries the token gets bookmarked, pasted into a chat and
-// left in a history. localStorage on this origin is where it belongs.
+// Taken out of the address bar once read: a URL carrying the token gets
+// bookmarked, pasted into a chat and left in a history.
 const initialToken = (): string => {
   const params = new URLSearchParams(location.search);
   const fromUrl = params.get("t");
@@ -106,10 +101,8 @@ const initialToken = (): string => {
   return fromUrl;
 };
 
-// Hidden visitors live here rather than in the database, because this is a view
-// preference: it keeps the owner's own browser (and anything else worth
-// ignoring) out of this list without deleting a row, changing what /collect
-// accepts, or touching what the bookmarklet shows on the page itself.
+// A view preference, not data: hiding the owner's own browser must not delete a
+// row, change what /collect accepts, or touch what the bookmarklet shows.
 const readHidden = (): Hidden[] => {
   try {
     const raw: unknown = JSON.parse(store.get(HIDDEN_KEY) || "[]");
@@ -124,9 +117,8 @@ const readHidden = (): Hidden[] => {
 
 // ---------- api ----------
 
-// A rejected token is not a per-request error: it puts the whole page back
-// behind the gate. Its own type, so a caller reports that instead of painting
-// "Error: unauthorized" over the message the gate just showed.
+// A rejected token puts the whole page back behind the gate, so it gets its own
+// type — otherwise a caller paints "Error: unauthorized" over the gate.
 class Unauthorized extends Error {}
 
 const call = async (
@@ -150,8 +142,8 @@ const toDateInput = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-// Date inputs are local days, not UTC ones: "today" has to mean the owner's
-// today, and the API takes epoch ms, so the conversion happens exactly here.
+// Local days, not UTC: "today" means the owner's today, and the API takes
+// epoch ms, so the conversion happens exactly here.
 const fromDateInput = (v: string, endOfDay = false) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
   if (!m) return NaN;
@@ -183,9 +175,8 @@ const resolveRange = (f: Filters): { from: number; to: number; label: string } =
 
 // ---------- deep links ----------
 
-// A site key is whatever a beacon claimed, so it is checked against the shape of
-// a hostname before anything is opened with it: "evil.com@real.site" is a
-// perfectly good TEXT column value and a completely different origin.
+// A site key is whatever a beacon claimed: "evil.com@real.site" is a fine TEXT
+// value and a completely different origin, so the shape is checked before use.
 const HOSTNAME = /^[a-z0-9.-]{1,64}$/i;
 const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/i;
 const safePath = (p: string) => /^\/($|[^/\\])/.test(p) && !/[\\\x00-\x1f\x7f]/.test(p);
@@ -207,27 +198,34 @@ const chipStyle = (sessionId: string) => {
   return { background: `hsl(${hue} 42% 24%)`, color: `hsl(${hue} 72% 78%)` };
 };
 
-// A cell of numbers, right-aligned so digits line up down the column, and
-// never wrapping — a table whose columns move as rows load is unreadable.
+// Right-aligned and non-wrapping: a table whose columns move as rows load is
+// unreadable.
 const NUM = "border-b border-line px-2 py-2 text-right tabular-nums whitespace-nowrap align-middle";
 const CELL = "border-b border-line px-2 py-2 align-middle";
 
-// The engaged clock, the same number the viewer shows. "~" marks a visit with a
-// leg recorded before the tracker measured attention, where the number is a
-// floor rebuilt from event gaps rather than something the page observed.
+// The engaged clock, as the viewer shows it. "~" is a floor rebuilt from event
+// gaps, for a leg recorded before the tracker measured attention.
 const activeText = (v: { active_ms: number; active_estimated: number }) =>
   `${v.active_estimated ? "~" : ""}${fmtTime(v.active_ms)}`;
 
-// Two badges, because a row answers two questions and one badge cannot.
-//
-// The visitor badge is the id that persists: it is what makes a returning
-// person visible as one person, so it carries the count of that visitor's other
-// visits on screen and the colour hash the viewer uses for the same id.
-//
-// The visit badge is this visit — the key /api/journey anchors on, the six
-// characters the viewer prints on the rows one click replays together, and what
-// a leg numbers itself against. Deliberately quiet: it identifies a row, it
-// does not group anything.
+// A regional-indicator pair. Platforms with no flag glyphs (Windows) draw the
+// two letters instead, which is why no code is printed beside it. Re-checked
+// rather than trusted: fromCodePoint on anything else throws and takes the
+// table down.
+const CountryFlag = ({ code }: { code: string | null }) => {
+  if (!code || !/^[A-Z]{2}$/.test(code)) return null;
+  const flag = String.fromCodePoint(...[...code].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+  return (
+    <span class="shrink-0 text-sm leading-4.5" title={`country ${code}`} aria-label={code}>
+      {flag}
+    </span>
+  );
+};
+
+// Two badges, because a row answers two questions. The visitor badge is the id
+// that persists, so it carries the count of that visitor's other visits and the
+// viewer's colour hash. The visit badge is the key /api/journey anchors on, and
+// is deliberately quiet: it identifies a row, it does not group anything.
 function VisitorBadge({ visit, repeat }: { visit: Visit; repeat: number }) {
   return (
     <span
@@ -270,14 +268,16 @@ function VisitRow({
   onHide: (visit: Visit) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // One <tbody> per visit rather than one <tr>: it keeps a visit's legs inside
-  // the element that is the visit, and it is what lets the expanded rows sit in
-  // the same table without breaking the column tracks.
+  // One <tbody> per visit: it keeps the legs inside the element that is the
+  // visit, and lets the expanded rows share the table's column tracks.
   return (
     <tbody data-episode={visit.episode} class="transition-colors hover:bg-panel2">
       <tr>
         <td class={CELL}>
-          <VisitorBadge visit={visit} repeat={repeat} />
+          <div class="flex items-center gap-1.5">
+            <VisitorBadge visit={visit} repeat={repeat} />
+            <CountryFlag code={visit.country} />
+          </div>
         </td>
         <td class={CELL}>
           <VisitBadge visit={visit} />
@@ -379,11 +379,14 @@ function VisitRow({
   );
 }
 
-// The columns, in order — one definition, used by the header, by the colSpan of
-// an expanded visit's legs, and by nothing else. A header that can disagree
-// with its rows is the whole reason a table drifts.
+// One definition, used by the header and by the legs' colSpan. A header that
+// can disagree with its rows is how a table drifts.
 const COLUMNS: { label: string; title?: string; align?: "right"; grow?: true }[] = [
-  { label: "Visitor", title: "The id this browser has kept since its first visit" },
+  {
+    label: "Visitor",
+    title:
+      "The id this browser has kept since its first visit, and the country the edge placed it in",
+  },
   { label: "Visit", title: "This uninterrupted run of navigation" },
   { label: "Site / entry page", grow: true },
   { label: "Pages", title: "Pages in this visit", align: "right" },
@@ -399,9 +402,8 @@ const COLUMNS: { label: string; title?: string; align?: "right"; grow?: true }[]
   { label: "", title: "" },
 ];
 
-// One sentence, spaces and all — a row of flex children reads back as
-// "2visits·3pages" to a screen reader and to anything that copies it, and the
-// gap between them is only paint.
+// One sentence, spaces and all: a row of flex children reads back as
+// "2visits·3pages" to a screen reader, since the gap is only paint.
 function Summary({
   visits,
   total,
@@ -674,9 +676,8 @@ function App() {
     }
   };
 
-  // The tab is opened on the click itself and navigated when the ticket comes
-  // back: a window.open() after an await has lost its user gesture and dies in
-  // a popup blocker. If it was blocked anyway, the link is still worth having.
+  // Opened on the click and navigated when the ticket lands: window.open()
+  // after an await has lost its user gesture and dies in a popup blocker.
   const replay = async (pv: string) => {
     const tab = window.open("", "_blank");
     if (tab) {
@@ -689,9 +690,8 @@ function App() {
     say("Minting replay link…");
     try {
       const url = await mint(pv);
-      // A site key is a hostname and carries no port, so a recording made on a
-      // dev server can only ever produce http://localhost/… — not where it
-      // happened. Hand the link over rather than open a tab that cannot work.
+      // A site key carries no port, so a dev-server recording only ever yields
+      // http://localhost/… — hand the link over instead of a dead tab.
       if (LOCAL.test(new URL(url).hostname)) {
         tab?.close();
         await copy(url);

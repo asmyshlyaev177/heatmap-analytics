@@ -33,29 +33,23 @@ export const frac = (v: unknown): number | null => {
   return Number.isFinite(n) ? Math.max(-2, Math.min(3, +n.toFixed(4))) : null;
 };
 
-// The session id is minted once in the browser (a random UUID) and kept in
-// localStorage, so it arrives with every beacon and the collector derives
-// nothing from the request: no IP, no User-Agent, no hashing, no salt table.
-// Its value is opaque here — only its shape is pinned, and SID_RE is shared
-// with the tracker so both ends can never disagree on what is acceptable.
-//
-// A beacon with no usable id — a tracker cached from before `sid` existed, a
-// hand-rolled POST — still has to produce a NOT NULL column. It gets a
-// throwaway random id: that pageview simply never chains into a journey, which
-// is the honest outcome. The alternative (one shared constant) would merge every
-// such visitor into a single fake session.
+// Minted in the browser, opaque here; SID_RE is shared with the tracker so the
+// ends cannot disagree. An unusable id becomes a throwaway rather than one
+// shared constant, which would merge every such visitor into a single session.
 export const sessionId = (v: unknown): string =>
   typeof v === "string" && SID_RE.test(v) ? v : crypto.randomUUID();
 
-// started_at is what every retention cutoff is measured against, so it cannot
-// be whatever the beacon claims: a future value never ages out of any purge, a
-// 0/ancient one is swept on the next cron. A legitimate tracker only ever sends
-// its own Date.now(), so an
-// implausible value is replaced by the receive time rather than clamped to the
-// bound it broke — clamping 0 to the floor would still read as ancient. The
-// cap at `now` is what enforces retention; the floor is deliberately wide
-// because antedating only expires the sender's own row (started_at is written
-// on insert only, so nobody can rewind someone else's pageview).
+// Cloudflare geolocates the connecting address at the edge — the address is
+// never read here. Another host is a one-string change (Vercel:
+// x-vercel-ip-country). NULL off the edge, and for "XX" and Tor's "T1".
+export const country = (req: Request): string | null => {
+  const c = req.headers.get("CF-IPCountry");
+  return c && /^[A-Z]{2}$/.test(c) && c !== "XX" ? c : null;
+};
+
+// Retention is measured against started_at, so an implausible claim is replaced
+// by the receive time, not clamped — clamping 0 to the floor still reads as
+// ancient. The floor is wide: antedating only expires the sender's own row.
 export const SA_MAX_AGE_MS = 10 * 365 * 86_400_000;
 
 export const startedAt = (v: unknown, now: number): number => {
@@ -63,16 +57,9 @@ export const startedAt = (v: unknown, now: number): number => {
   return t > now || t < now - SA_MAX_AGE_MS ? now : t;
 };
 
-// Engaged time off the beacon. A tracker that does not send one leaves NULL —
-// "never measured" — which the read API answers by reconstructing a floor from
-// the pageview's events; it is not the same claim as a measured zero, and the
-// column is nullable so the two cannot be confused.
-//
-// The upper bound is exact rather than arbitrary: engagement accrues only
-// while the page is open, so it cannot exceed the span to the last recorded
-// event plus the one grace period that can accrue after it. That keeps a
-// beacon from filing a visit as days long, and keeps the two clocks it sends
-// consistent with each other.
+// NULL is "never measured", which the read API reconstructs a floor for and a
+// measured 0 must not be confused with. The cap is exact: engagement cannot
+// outrun the span to the last event plus one grace period.
 export const activeMs = (v: unknown, durationMs: number): number | null => {
   if (v == null) return null;
   const n = int(v);
@@ -80,16 +67,11 @@ export const activeMs = (v: unknown, durationMs: number): number | null => {
   return Math.max(0, Math.min(n, Math.max(0, durationMs) + ENGAGEMENT_GRACE_MS));
 };
 
-// The viewer assigns pageviews.path to a full-viewport same-origin iframe's
-// src, so a stored "javascript:...", "data:text/html,..." or "//evil.com/x"
-// would run in the OWNER's origin. A legitimate tracker only ever sends
-// location.pathname, so anything else is hostile or a bug: refuse the beacon
-// instead of storing a normalised guess, which would still attribute events to
-// a path nobody visited and leave a value the viewer has to keep defending.
-// Rules: one leading slash and no second one (blocks "//evil.com" and, with
-// the leading slash, every scheme), no backslash (browsers fold it to "/"),
-// no control characters and no space (URL parsing strips them, so
-// "/\tjavascript:x" must not survive as a path either).
+// The viewer assigns path to a same-origin iframe src, so a stored
+// "javascript:", "data:" or "//evil.com" would run in the OWNER's origin.
+// One leading slash and no second (kills schemes and protocol-relative), no
+// backslash (browsers fold it to "/"), no control chars or space (URL parsing
+// strips them, so "/\tjavascript:x" must not survive either).
 export const isSafePath = (v: unknown): v is string => {
   if (typeof v !== "string" || v[0] !== "/" || v[1] === "/") return false;
   for (const ch of v) {
@@ -139,20 +121,16 @@ export async function collect(req: Request, env: Env, now = Date.now()): Promise
 
   const sid = sessionId(body.sid);
 
-  // session_id is only set on first insert, so a later flush of the same
-  // pageview updates duration/scroll without re-keying the session — a visitor
-  // who clears localStorage mid-pageview must not retro-split it.
-  // Every updated column only ever grows: beacons are fire-and-forget and the
-  // keepalive re-send can land after a later flush, and a rewound duration_ms
-  // both loses recorded time and splits the episode chained on it. active_ms
-  // takes the same treatment through a CASE rather than max(), so that a NULL
-  // from a tracker predating the measurement cannot erase a value a later
-  // flush already established.
+  // session_id and country are insert-only: a later flush must not re-key or
+  // re-place a visit. Every updated column only grows — beacons are
+  // fire-and-forget and a keepalive re-send can land after a later flush, and a
+  // rewound duration_ms splits the episode chained on it. active_ms uses CASE,
+  // not max(), so a NULL from an older tracker cannot erase a measured value.
   const duration = int(body.d);
   const stmts: D1PreparedStatement[] = [
     env.DB.prepare(
-      `INSERT INTO pageviews (id, session_id, site, path, vw, vh, started_at, duration_ms, active_ms, max_scroll)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+      `INSERT INTO pageviews (id, session_id, site, path, vw, vh, started_at, duration_ms, active_ms, max_scroll, country)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
        ON CONFLICT(id) DO UPDATE SET
          duration_ms = max(pageviews.duration_ms, excluded.duration_ms),
          active_ms = CASE
@@ -171,6 +149,7 @@ export async function collect(req: Request, env: Env, now = Date.now()): Promise
       duration,
       activeMs(body.am, duration),
       Math.max(0, Math.min(100, int(body.msc))),
+      country(req),
     ),
   ];
 
@@ -183,9 +162,8 @@ export async function collect(req: Request, env: Env, now = Date.now()): Promise
     )
     .slice(0, 1000);
 
-  // 9 bind params per row; D1 caps ~100 params per statement, so chunk by 10.
-  // OR IGNORE + unique (pv, seq): a batch re-sent by the fetch-keepalive
-  // fallback can't duplicate events.
+  // 9 params/row against D1's ~100 per statement. OR IGNORE + unique (pv, seq):
+  // a keepalive re-send cannot duplicate.
   for (let i = 0; i < rows.length; i += 10) {
     const chunk = rows.slice(i, i + 10);
     const sql =
@@ -218,22 +196,13 @@ export function authorized(url: URL, env: Env): boolean {
 
 // ---------- replay tickets ----------
 //
-// A replay runs on the recorded page, which is not the owner's origin: the
-// dashboard lists recordings from every connected site and opens
-// https://<site><path>#__hma=<ticket> to play one. Whatever authorises that
-// read is therefore readable by every script the site loads, and sits in its
-// address bar and history besides — so it must not be the VIEWER_TOKEN, which
-// is permanent and reads everything.
-//
-// A ticket is the narrow version of it: a random id, valid for minutes, that
-// can only read one visitor's recordings on one site. It is not single-use,
-// because one replay is many reads (the journey, then each leg) — the bound
-// that matters is time and scope, not count.
+// A replay runs on the recorded page, so whatever authorises it is readable by
+// every script there and sits in the address bar — never the VIEWER_TOKEN. A
+// ticket is random, minutes long, and scoped to one visitor on one site. Not
+// single-use: one replay is many reads, so the bound is time and scope.
 export const TICKET_TTL_MS = 10 * 60_000;
 
-// Shape only, like SID_RE: the value is minted here as a UUID, and pinning the
-// shape keeps a hand-written one out of the LIKE-free but still string-typed
-// lookup below.
+// Shape only, like SID_RE: the lookup below is string-typed.
 export const TICKET_RE = /^[\w-]{16,64}$/;
 
 export type Auth =
@@ -249,9 +218,8 @@ interface TicketRow {
   expires_at: number;
 }
 
-// Either credential, resolved to what it is allowed to do. The token wins when
-// both are present — a ticket only ever widens a request that had no other way
-// in, and the token's answer is the one that needs no database round trip.
+// The token wins when both are present: it needs no database round trip, and a
+// ticket only ever widens a request that had no other way in.
 export async function authenticate(url: URL, env: Env, now = Date.now()): Promise<Auth | null> {
   if (authorized(url, env)) return TOKEN_AUTH;
   const tk = url.searchParams.get("tk") ?? "";
@@ -273,9 +241,8 @@ export async function authenticate(url: URL, env: Env, now = Date.now()): Promis
   };
 }
 
-// POST /api/ticket?pv=<id> — token only. The scope is read off the pageview
-// rather than taken from the caller, so a ticket can never be minted for a
-// site or a visitor the requested recording does not belong to.
+// POST /api/ticket?pv=<id> — token only. Scope is read off the pageview, never
+// from the caller, so a ticket cannot name a site or visitor it does not own.
 export async function apiTicketMint(url: URL, env: Env, now = Date.now()): Promise<Response> {
   const pv = url.searchParams.get("pv") ?? "";
   const { results } = await env.DB.prepare(
@@ -297,9 +264,8 @@ export async function apiTicketMint(url: URL, env: Env, now = Date.now()): Promi
   return json({ tk: id, pv: row.id, site: row.site, path: row.path, expires_at });
 }
 
-// GET /api/ticket — what the viewer asks on a deep link, to learn which
-// recording it was sent to play. A ticket describes itself; a token caller has
-// to name one, which is how the route stays useful for both.
+// GET /api/ticket — which recording a deep link was sent to play. A ticket
+// describes itself; a token caller names one.
 export async function apiTicketResolve(url: URL, env: Env, auth: Auth): Promise<Response> {
   if (auth.kind === "ticket") {
     return json({ site: auth.site, pv: auth.pv, sid: auth.sid, expires_at: auth.expires_at });
@@ -357,31 +323,12 @@ export async function apiElements(url: URL, env: Env): Promise<Response> {
 export async function apiSessions(url: URL, env: Env): Promise<Response> {
   const site = url.searchParams.get("site") ?? "";
   const path = url.searchParams.get("path") ?? "/";
-  // Two different times per row, because one number cannot be both.
-  //
-  // duration_ms is wall clock: the tracker reports the timestamp of its last
-  // recorded event, so a tab opened and left alone for four minutes reports
-  // four minutes. That is the right input for episode chaining below (it says
-  // when the pageview stopped being touched) and a bad thing to show a human,
-  // who reads "⏱️ 3:35" as attention.
-  //
-  // active_ms is attention, measured in the browser (see src/tracker.ts) and
-  // read straight out of the column here. It is not derivable from what this
-  // table stores: the two facts that decide it — whether the tab was on screen,
-  // and whether a silence was a still read or an abandoned tab — are only
-  // knowable at the moment they happen.
-  //
-  // NULL means a tracker that did not measure it wrote the row: everything
-  // recorded before the column existed, plus beacons from pages still running
-  // a bundle cached before the change. Those get reconstructed rather than
-  // reported as zero — each gap between consecutive events counted up to
-  // IDLE_GAP_MS, the first running from the pageview's start (LAG default 0).
-  // Deliberately the short replay threshold and not ENGAGEMENT_GRACE_MS: with
-  // no visibility signal to lean on, a reconstruction should be a floor, and a
-  // floor is the one kind of wrong number that cannot flatter the page.
-  //
-  // Both bounds matter: `t` arrives from an unauthenticated beacon, so a
-  // negative or rewound one must not be able to subtract from anyone's total.
+  // Two clocks, because one number cannot be both. duration_ms is wall clock,
+  // right for the episode chaining below and wrong to show a human; active_ms
+  // is attention, measured in the browser and not derivable from this table.
+  // NULL is never-measured, rebuilt as a floor from gaps capped at IDLE_GAP_MS
+  // — the replay threshold, not ENGAGEMENT_GRACE_MS, because a floor is the one
+  // wrong number that cannot flatter the page. Both bounds guard a rewound `t`.
   const { results } = await env.DB.prepare(
     `WITH pv AS (
        SELECT id, session_id, started_at, duration_ms, active_ms, vw, vh, max_scroll
@@ -417,11 +364,9 @@ export async function apiSessions(url: URL, env: Env): Promise<Response> {
   const sids = [...new Set(results.map((r) => String(r.session_id)))].filter(Boolean);
   const bySid = new Map<string, { id: string; started_at: number; duration_ms: number }[]>();
   if (sids.length) {
-    // A session id never rotates, so "every pageview of these 30 sessions" is
-    // unbounded — it grows with the whole retention window. Only pageviews near
-    // the listed ones can chain to them, so the lookup is bounded to a window
-    // around the rows being annotated. An episode that somehow ran past that
-    // window is undercounted in the `pages` badge and nothing else.
+    // A never-rotating id makes "every pageview of these sessions" grow with the
+    // retention window. Only nearby ones can chain, so the lookup is windowed;
+    // an episode past it undercounts `pages` and nothing else.
     const starts = results.map((r) => int(r.started_at));
     const lo = Math.min(...starts) - EPISODE_WINDOW_MS;
     const hi = Math.max(...results.map((r) => int(r.started_at) + int(r.duration_ms)))
@@ -444,44 +389,32 @@ export async function apiSessions(url: URL, env: Env): Promise<Response> {
   }
   for (const row of results) {
     const list = bySid.get(String(row.session_id)) ?? [];
-    // episodeAround() returns its whole input for an id it cannot find, which
-    // is right for a journey and wrong for a count — a row missing from the
-    // bounded lookup above would report the session's size as its own.
+    // episodeAround() returns its whole input for an id it cannot find: right
+    // for a journey, wrong for a count.
     const known = list.some((p) => p.id === String(row.id));
     const episode = known ? episodeAround(list, String(row.id)) : [];
     row.pages = known ? episode.length : 1;
-    // Which *visit* this row belongs to, keyed by the pageview the visit opened
-    // with. A session_id identifies a person and never rotates, so it cannot
-    // tell one visit from the next — on a site whose owner is its main visitor
-    // it never varies at all. This does, and rows sharing it are the rows one
-    // click replays together.
+    // Which visit this row belongs to. session_id identifies a person and never
+    // rotates, so it cannot tell one visit from the next; this can, and rows
+    // sharing it are what one click replays together.
     row.episode = known ? episode[0].id : row.id;
-    // …and where in that visit this row sits. The list is filtered to one path
-    // while an episode spans all of them, so these run 1-based over the whole
-    // journey and arrive non-contiguous (3, 7, 9) when a visitor kept coming
-    // back to this page — which is the interesting part.
+    // 1-based over the whole journey, so a list filtered to one path shows them
+    // non-contiguous (3, 7, 9) when a visitor kept coming back — the point.
     row.leg = known ? episode.findIndex((p) => p.id === String(row.id)) + 1 : 1;
   }
   return json({ sessions: results });
 }
 
-// A session id outlives any single visit, so pageviews must be chained into
-// journeys explicitly. Two pageviews belong to the same journey only when the
-// next one starts within seconds of the previous one's last activity — the
-// signature of an actual navigation (soft or full). Longer idle between
-// recordings means separate replays.
+// A session id outlives a visit, so journeys are chained explicitly: the next
+// pageview opening within seconds of the last activity is a navigation.
 export const NAV_CHAIN_GAP_MS = 30_000;
 
-// How far either side of a listed pageview apiSessions looks for episode
-// siblings. Legs chain at under NAV_CHAIN_GAP_MS apart, so reaching this far
-// takes hours of unbroken navigation.
+// How far apiSessions looks for episode siblings — hours of unbroken
+// navigation to reach it.
 export const EPISODE_WINDOW_MS = 6 * 3_600_000;
 
-// The one definition of "these two pageviews are the same visit": the next one
-// opened within seconds of the previous one's last recorded activity. Both the
-// journey walk below and the dashboard's visit list read it from here, because
-// two answers to that question would put a different number of pages on a row
-// than the replay it opens.
+// One definition of "same visit", shared by the journey walk and the dashboard
+// list — two answers would put a different page count on a row than its replay.
 export const chainedNav = (
   prev: { started_at: number; duration_ms: number },
   next: { started_at: number },
@@ -501,10 +434,8 @@ export function episodeAround<T extends { id: string; started_at: number; durati
   return sorted.slice(lo, hi + 1);
 }
 
-// The response is bounded, but the requested pageview must always be inside it
-// — the viewer falls back to index 0 when it is missing, and would then replay
-// some other pageview of the session. So the window is centred on the request
-// instead of being taken from the start of the episode.
+// Centred on the requested pageview, not the start of the episode: the viewer
+// falls back to index 0 when it is missing and would replay the wrong one.
 export const JOURNEY_WINDOW = 50;
 
 export function journeyWindow<T extends { id: string }>(episode: T[], pvId: string): T[] {
@@ -519,16 +450,12 @@ export function journeyWindow<T extends { id: string }>(episode: T[], pvId: stri
 
 // ---------- dashboard reads ----------
 //
-// The viewer answers "what happened on the page I am standing on". The
-// dashboard answers "what happened anywhere", which is a different query and
-// gets its own endpoint rather than more optional parameters on this one:
-// /api/sessions is scoped to one site and one path by construction, and the
-// bounds that make it safe (30 rows, siblings within ±6h of those rows) are
-// derived from that scope.
+// "What happened anywhere", against the viewer's "on this page" — its own
+// endpoint, because /api/sessions is scoped to one site and path and the bounds
+// that make it safe are derived from that scope.
 
-// How many pageviews one /api/replays call will look at. The scan itself is
-// index-driven and carries no events join, so this is cheap; the expensive
-// per-pageview statistics are gathered afterwards for the returned page only.
+// Pageviews one /api/replays call scans. Index-driven with no events join, so
+// cheap; the costly per-pageview statistics run on the returned page only.
 export const REPLAYS_SCAN_CAP = 2000;
 export const REPLAYS_PAGE_MAX = 100;
 // D1 refuses a statement with more than 100 bound parameters. Exclusions and
@@ -536,9 +463,8 @@ export const REPLAYS_PAGE_MAX = 100;
 export const MAX_EXCLUSIONS = 40;
 export const STATS_CHUNK = 80;
 
-// A range bound: epoch ms, or a YYYY-MM-DD date the dashboard did not convert.
-// Anything else falls back rather than becoming NaN, which SQLite would bind
-// as NULL and quietly match nothing.
+// Epoch ms, or a YYYY-MM-DD the dashboard did not convert. Anything else falls
+// back rather than becoming a NaN that SQLite binds as NULL and never matches.
 export const timeParam = (v: string | null, fallback: number): number => {
   if (!v) return fallback;
   if (/^-?\d+$/.test(v)) return Number(v);
@@ -557,6 +483,7 @@ export interface LegRow {
   vw: number;
   vh: number;
   max_scroll: number;
+  country: string | null;
   clicks?: number;
   rage?: number;
   events?: number;
@@ -580,17 +507,14 @@ export interface Visit {
   max_scroll: number;
   vw: number;
   vh: number;
+  country: string | null;
   legs: LegRow[];
 }
 
-// Pageviews -> visits. A session id identifies a person and never rotates, so
-// the row that a "replays list" wants is the visit, not the visitor and not the
-// pageview: one row per uninterrupted run of navigation, which is the unit a
-// replay actually plays back.
-//
-// Grouped by site as well as session id: localStorage is per-origin, so two
-// sites cannot share an id — but a forged beacon can claim any pair, and
-// chaining across sites would build a visit whose legs no journey can replay.
+// One row per uninterrupted run of navigation — the unit a replay plays back,
+// which a never-rotating session id cannot identify on its own. Grouped by site
+// too: a forged beacon can claim any pair, and a cross-site visit has no
+// journey to replay.
 export function buildVisits(rows: LegRow[]): Visit[] {
   const bySession = new Map<string, LegRow[]>();
   for (const row of rows) {
@@ -614,15 +538,14 @@ export function buildVisits(rows: LegRow[]): Visit[] {
     }
     close();
   }
-  // Newest first, with the id as the tiebreak — two pageviews can share a
-  // millisecond, and an unstable order makes a paginated list repeat or skip.
+  // Id as the tiebreak: two pageviews can share a millisecond, and an unstable
+  // order makes a paginated list repeat or skip.
   visits.sort((a, b) => b.started_at - a.started_at || (a.episode < b.episode ? 1 : -1));
   return visits;
 }
 
-// The visit's own numbers, none of them borrowed from a single leg: the key is
-// the pageview the visit opened with (what /api/journey anchors on), the end is
-// the last leg's last recorded activity, and the totals are sums over legs.
+// The visit's own numbers: keyed on the leg it opened with (what /api/journey
+// anchors on), ended at the last leg's last activity, totals summed over legs.
 function summarise(legs: LegRow[]): Visit {
   const head = legs[0];
   const tail = legs[legs.length - 1];
@@ -637,10 +560,8 @@ function summarise(legs: LegRow[]): Visit {
     pages: legs.length,
     duration_ms: tail.started_at + tail.duration_ms - head.started_at,
     active_ms: sum((l) => l.active_ms ?? 0),
-    // one leg nobody measured makes the visit's total a floor, and it has to
-    // say so — the same "~" the viewer shows, decided the same way. Read off
-    // the flag rather than off active_ms, which stops being null once the
-    // reconstruction below fills it in.
+    // One unmeasured leg makes the total a floor. Read off the flag, not
+    // active_ms, which stops being null once the reconstruction fills it in.
     active_estimated: legs.some((l) => l.active_estimated) ? 1 : 0,
     clicks: sum((l) => l.clicks ?? 0),
     rage: sum((l) => l.rage ?? 0),
@@ -648,14 +569,14 @@ function summarise(legs: LegRow[]): Visit {
     max_scroll: legs.reduce((n, l) => Math.max(n, l.max_scroll), 0),
     vw: head.vw,
     vh: head.vh,
+    // the leg the deep link replays from; legs disagree only on a mid-visit VPN
+    country: head.country,
     legs,
   };
 }
 
-// Per-pageview statistics for the page being returned, in id chunks that stay
-// under D1's parameter ceiling. Same reconstruction as /api/sessions for rows
-// whose tracker never measured active time — see the comment there for why a
-// gap capped at IDLE_GAP_MS is the only honest floor.
+// Per-pageview statistics for the returned page, chunked under D1's parameter
+// ceiling. Same IDLE_GAP_MS reconstruction as /api/sessions.
 interface LegStats {
   clicks: number;
   rage: number;
@@ -698,22 +619,16 @@ export async function apiReplays(url: URL, env: Env, now = Date.now()): Promise<
   const q = (p.get("q") ?? "").trim().toLowerCase();
   const limit = Math.max(1, Math.min(REPLAYS_PAGE_MAX, int(p.get("limit")) || 25));
   const offset = Math.max(0, int(p.get("offset")));
-  // Hidden visitors are the dashboard's own list, sent along on every read.
-  // Filtered to the id shape both ends already agree on: an empty or malformed
-  // entry in a NOT IN list is not an error in SQLite, it is a NULL that makes
-  // the whole predicate unknown and returns nothing at all.
+  // Filtered to the shared id shape: a malformed entry in a NOT IN list is not
+  // an error in SQLite but a NULL that makes the predicate return nothing.
   const exclude = (p.get("exclude") ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter((s) => SID_RE.test(s))
     .slice(0, MAX_EXCLUSIONS);
 
-  // The lower bound is padded by one episode window, because a visit that
-  // started before the range is still the visit the range's rows belong to —
-  // and its *first* leg is the id a deep link replays from. Without the pad a
-  // visit straddling midnight would be listed headless, and the link would
-  // start the replay in the middle of it. Visits that end before the range
-  // begins are dropped again below.
+  // Padded by one episode window: a visit straddling the bound would otherwise
+  // be listed headless and replay from its middle. The pad is dropped below.
   const where = ["started_at >= ?", "started_at < ?"];
   const binds: unknown[] = [from - EPISODE_WINDOW_MS, to];
   // Appended only when set: `(? = '' OR site = ?)` would read the same and cost
@@ -729,7 +644,7 @@ export async function apiReplays(url: URL, env: Env, now = Date.now()): Promise<
   binds.push(REPLAYS_SCAN_CAP);
 
   const scan = await env.DB.prepare(
-    `SELECT id, session_id, site, path, started_at, duration_ms, active_ms, vw, vh, max_scroll
+    `SELECT id, session_id, site, path, started_at, duration_ms, active_ms, vw, vh, max_scroll, country
      FROM pageviews
      WHERE ${where.join(" AND ")}
      ORDER BY started_at DESC, id DESC
@@ -745,11 +660,9 @@ export async function apiReplays(url: URL, env: Env, now = Date.now()): Promise<
   let visits = buildVisits(scan.results)
     // the pad is scaffolding for chaining, not part of the answer
     .filter((v) => v.ended_at >= from)
-    // A visit with nothing recorded anywhere in it has no replay to open.
-    // duration_ms is the timestamp of the last recorded event, so zero across
-    // every leg means the beacon carried a pageview and no events. They stay in
-    // the scan regardless, because dropping a middle leg would split its visit;
-    // ?empty=1 asks for them back.
+    // Zero duration on every leg is a pageview with no events and no replay to
+    // open. Dropped here and not in the scan, where losing a middle leg would
+    // split the visit; ?empty=1 asks for them back.
     .filter(
       (v) => p.get("empty") === "1" || v.legs.some((l) => l.duration_ms > 0 || l.max_scroll > 0),
     );
@@ -774,9 +687,8 @@ export async function apiReplays(url: URL, env: Env, now = Date.now()): Promise<
   return json({ visits: page, total, from, to, truncated, scanned: scan.results.length });
 }
 
-// GET /api/sites — which sites are reporting, for the dashboard's filter.
-// "visitors" counts distinct browsers in the range, which is not people: an id
-// is per-origin and per-device, and it never rotates.
+// GET /api/sites — the dashboard's filter. "visitors" counts browsers, not
+// people: an id is per-origin, per-device, and never rotates.
 export async function apiSites(url: URL, env: Env, now = Date.now()): Promise<Response> {
   const to = timeParam(url.searchParams.get("to"), now + 3_600_000);
   const from = Math.min(timeParam(url.searchParams.get("from"), 0), to);
@@ -796,24 +708,17 @@ export async function apiSites(url: URL, env: Env, now = Date.now()): Promise<Re
   return json({ sites: results, from, to });
 }
 
-// All pageviews of one session (a "journey"), ordered — lets the viewer
-// follow the visitor across route changes during replay.
-//
-// The row cap has to be taken around the requested pageview, not from the start
-// of the session: a session id is permanent, so a returning visitor accumulates
-// pageviews without bound and `ORDER BY started_at LIMIT 200` would return the
-// oldest 200 — never the recording the viewer asked to replay. Nearest-in-time
-// first puts the requested pageview at row 1 by construction; chronological
-// order is restored below, because episode chaining depends on it. With no ?pv
-// there is no anchor, so the most recent pageviews win instead of the oldest.
+// One session's pageviews, so the viewer can follow route changes during a
+// replay. Ordered nearest-in-time to the requested one: a permanent id
+// accumulates without bound, and `LIMIT 200` from the start would never include
+// the recording asked for. Chronological order is restored below, which the
+// episode chaining depends on; with no ?pv the newest win.
 export async function apiJourney(url: URL, env: Env, auth: Auth = TOKEN_AUTH): Promise<Response> {
   const site = url.searchParams.get("site") ?? "";
   const sid = url.searchParams.get("sid") ?? "";
   const pv = url.searchParams.get("pv") ?? "";
-  // A ticket may read the visitor it was minted for and nobody else. The
-  // parameters are checked rather than overridden, so a link that asks for
-  // someone else's journey is refused instead of quietly answered with a
-  // different visitor's recording.
+  // Checked, not overridden: a link asking for another visitor's journey is
+  // refused rather than quietly answered with someone else's recording.
   if (auth.kind === "ticket" && (site !== auth.site || sid !== auth.sid)) {
     return json({ error: "forbidden" }, 403);
   }
@@ -841,7 +746,14 @@ export async function apiJourney(url: URL, env: Env, auth: Auth = TOKEN_AUTH): P
 export async function apiReplay(url: URL, env: Env, auth: Auth = TOKEN_AUTH): Promise<Response> {
   const id = url.searchParams.get("pv") ?? "";
   const [meta, events] = await Promise.all([
-    env.DB.prepare(`SELECT * FROM pageviews WHERE id = ?1`).bind(id).all(),
+    // Named, not `*`: a ticket reads this on an origin the owner does not
+    // control, so a new column must be a decision, not disclosure by default.
+    env.DB.prepare(
+      `SELECT id, session_id, site, path, vw, vh, started_at, duration_ms, active_ms, max_scroll
+       FROM pageviews WHERE id = ?1`,
+    )
+      .bind(id)
+      .all(),
     env.DB.prepare(
       `SELECT k, sel, rx, ry, x, y, t FROM events WHERE pv = ?1 ORDER BY seq LIMIT 25000`,
     )
@@ -849,11 +761,8 @@ export async function apiReplay(url: URL, env: Env, auth: Auth = TOKEN_AUTH): Pr
       .all(),
   ]);
   if (!meta.results.length) return json({ error: "not found" }, 404);
-  // This is the only read that takes a bare pageview id — no site, no session
-  // — so it is where a ticket would otherwise reach every recording in the
-  // database. A journey's other legs are all the same visitor on the same
-  // site, so pinning both is enough to let a deep link play its whole journey
-  // and nothing else.
+  // The only read taking a bare pageview id, so a ticket would otherwise reach
+  // every recording. Pinning site + visitor still plays the whole journey.
   const row = meta.results[0] as { site?: unknown; session_id?: unknown };
   if (auth.kind === "ticket" && (row.site !== auth.site || row.session_id !== auth.sid)) {
     return json({ error: "forbidden" }, 403);
@@ -870,8 +779,7 @@ export async function purge(env: Env, now = Date.now()): Promise<void> {
     .bind(cutoff)
     .run();
   await env.DB.prepare(`DELETE FROM pageviews WHERE started_at < ?1`).bind(cutoff).run();
-  // Tickets live for minutes, not days, so they are swept against the clock
-  // rather than the retention horizon. An expired one is already refused on
-  // use; this is what keeps the table from growing forever.
+  // Minutes, not days: swept against the clock, not the retention horizon. An
+  // expired ticket is already refused on use; this only bounds the table.
   await env.DB.prepare(`DELETE FROM replay_tickets WHERE expires_at < ?1`).bind(now).run();
 }

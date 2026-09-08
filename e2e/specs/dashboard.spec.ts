@@ -1,7 +1,5 @@
-// The dashboard: every visit on every connected site, filtered by date and by
-// path, minus the visitors the owner is hiding — and one click to replay any of
-// them on the page it was recorded on. Driven off mocked reads, so what is
-// under test is the page: what it sends, what it draws, and what it opens.
+// The dashboard, driven off mocked reads: what is under test is the page —
+// what it sends, what it draws, and what it opens.
 import { expect, test, type Page } from "@playwright/test";
 import {
   DASHBOARD,
@@ -49,6 +47,7 @@ const visit = (o: Record<string, unknown> = {}) => ({
   rage: 1,
   events: 20,
   max_scroll: 60,
+  country: "DE",
   legs: [leg("pv-a", "/pricing")],
   ...o,
 });
@@ -63,6 +62,8 @@ const OTHER = visit({
   pages: 2,
   clicks: 5,
   rage: 0,
+  // no edge placed this one: the row still draws, minus the flag
+  country: null,
   legs: [
     leg("pv-b", "/", { site: "two.example", session_id: "s-2" }),
     leg("pv-c", "/docs", { site: "two.example", session_id: "s-2" }),
@@ -132,6 +133,20 @@ test("every column has a header, and each visit fills them", async ({ page }) =>
   await expect(page.locator("#summary")).toContainText("2 visitors");
 });
 
+test("a placed visit flies its flag, an unplaced one draws nothing", async ({ page }) => {
+  await openDashboard(page, FX);
+  await expect(visits(page)).toHaveCount(2);
+
+  // The label, not the glyph: headless Chromium has no flag font and draws the
+  // two letters, exactly the fallback Windows readers get.
+  const flag = (row: number) => cell(page, row, 0).getByLabel("DE");
+  await expect(flag(0)).toHaveAttribute("title", "country DE");
+
+  await expect(cell(page, 1, 0).locator("span[aria-label]")).toHaveCount(0);
+  // …and the chip is still there: an absent country costs the cell nothing
+  await expect(cell(page, 1, 0)).toContainText("s2");
+});
+
 test("each row badges the visitor and the visit separately", async ({ page }) => {
   // two visits by s-1 on different days, one by s-2 between them
   await openDashboard(page, {
@@ -143,8 +158,9 @@ test("each row badges the visitor and the visit separately", async ({ page }) =>
     },
   });
 
-  // shortId drops the dashes of a real UUID, so "s-1" shows as "s1"
-  const visitor = (row: number) => cell(page, row, 0).locator("span");
+  // shortId drops the dashes of a real UUID, so "s-1" shows as "s1". .first():
+  // the cell holds the chip and, when placed, a flag — the chip carries the id.
+  const visitor = (row: number) => cell(page, row, 0).locator("span").first();
   const which = (row: number) => cell(page, row, 1).locator("span");
 
   // the visitor id is the one that persists, and says how many of this

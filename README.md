@@ -46,8 +46,8 @@ site (any host)          Cloudflare (this repo)
 
 `session_id` is a random id the browser mints once with `crypto.randomUUID()`
 and keeps under the `hma_sid` key in `localStorage`. It rides along on every
-beacon. The collector derives nothing of its own — no IP, no User-Agent, no
-hash, no salt table — and treats the value as opaque apart from pinning its
+beacon. The collector derives no part of it — no IP, no User-Agent, no hash, no
+salt table — and treats the value as opaque apart from pinning its
 shape (`/^[\w-]{8,64}$/`), because an unauthenticated beacon should not be able
 to put arbitrary text in a column the viewer sends back out as a query
 parameter. A value that fails the check is replaced by a throwaway id, so a
@@ -95,6 +95,42 @@ to reason about. Anyone repeating it elsewhere should deploy the Worker *before*
 running `pnpm db:schema`: the schema drops `salts`, and the old collector reads
 it on every ingest, so the reverse order 500s every beacon until the Worker
 lands.
+
+## Country
+
+Each pageview stores a two-letter country, and the collector reads no address to
+get it. Cloudflare geolocates the connecting IP at the edge, before the Worker
+runs, and passes the answer down in `CF-IPCountry`; the address itself is never
+read and never stored. `country()` in `src/api.ts` is the whole of it — one
+header, re-checked against `/^[A-Z]{2}$/` because a header is a header, and
+`NULL` for anything else.
+
+Where the tracked site is hosted has nothing to do with it. The beacon is a
+cross-origin POST from the visitor's browser straight to the Worker, so a page
+served from Vercel, Netlify or a static bucket still reaches Cloudflare's edge
+with the visitor's own address. What matters is that the *collector* is a
+Worker.
+
+`NULL` is a real answer and the dashboard draws nothing for it: `wrangler dev`
+without `--remote`, the e2e build's same-origin endpoint, Cloudflare's `XX` for
+an address it cannot place, and `T1` for Tor, which the shape check drops on its
+way past. Moving the collector off Cloudflare is a one-string change to that
+header (Vercel `x-vercel-ip-country`, CloudFront `CloudFront-Viewer-Country`, Fly
+`Fly-Client-Country`) — except Netlify, whose `x-nf-geo` is base64 JSON and needs
+a decode.
+
+Written on insert and never on the upsert of a later flush, the way `session_id`
+is: a visit is placed where it opened, so a VPN flipped mid-read cannot move it.
+A visit's country is its entry leg's, for the same reason.
+
+The dashboard prints it as a regional-indicator pair beside the visitor chip.
+Platforms with no flag glyphs — Windows — render the two letters instead, which
+is the same information, and why no code is printed next to it.
+
+**What it costs.** A country is coarse enough not to identify anyone on its own,
+but it is inferred from the visitor's address, so a privacy notice that
+enumerates what is collected should name it. Nothing else about the connection
+is kept.
 
 ## Time on page is not attention
 
@@ -352,12 +388,13 @@ An existing database is brought up to that shape by a numbered file in
 ```bash
 pnpm db:migrate --file=migrations/001-active-ms.sql
 pnpm db:migrate --file=migrations/002-replay-tickets.sql
+pnpm db:migrate --file=migrations/003-country.sql
 ```
 
 Both halves of a change land: the migration for databases that exist, the same
-statement in `schema.sql` for ones that do not. Re-running 001 errors on the
-duplicate column, which is the intended signal that it already landed; 002 adds
-a whole table, so it is `IF NOT EXISTS` and re-running it is a no-op.
+statement in `schema.sql` for ones that do not. Re-running 001 or 003 errors on
+the duplicate column, which is the intended signal that it already landed; 002
+adds a whole table, so it is `IF NOT EXISTS` and re-running it is a no-op.
 
 Order matters the same way it did for the `salts` removal — apply the migration
 *before* deploying a Worker that writes the new column, or every beacon 500s on

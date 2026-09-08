@@ -1,7 +1,5 @@
-// A D1 stand-in for tests: real SQL semantics via node:sqlite (same SQLite
-// engine D1 runs on), same prepare/bind/all/run/batch surface, plus D1's
-// limits encoded as assertions so a regression that exceeds them fails here
-// instead of in production.
+// A D1 stand-in: real SQL via node:sqlite, the same prepare/bind/all/run/batch
+// surface, and D1's limits as assertions so a regression fails here.
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -102,16 +100,26 @@ export function makeEnv(over: Partial<TestEnv> = {}): TestEnv {
   return { DB: new FakeD1(), VIEWER_TOKEN: "test-token", ...over };
 }
 
-// A collect() request shaped exactly like the tracker's beacon: text/plain
-// body, plus the CF-Connecting-IP + User-Agent headers every real browser
-// request carries and the collector must ignore.
+// The tracker's beacon: text/plain, the CF-Connecting-IP and User-Agent the
+// collector must ignore, and the CF-IPCountry it keeps. `country: null` is the
+// request as it arrives off Cloudflare.
 export function beacon(
   body: Record<string, unknown>,
-  { ip = "203.0.113.7", ua = "Mozilla/5.0 (TestBrowser)" } = {},
+  {
+    ip = "203.0.113.7",
+    ua = "Mozilla/5.0 (TestBrowser)",
+    country = "DE" as string | null,
+  } = {},
 ): Request {
+  const headers: Record<string, string> = {
+    "Content-Type": "text/plain",
+    "CF-Connecting-IP": ip,
+    "User-Agent": ua,
+  };
+  if (country !== null) headers["CF-IPCountry"] = country;
   return new Request("https://collector.test/collect", {
     method: "POST",
-    headers: { "Content-Type": "text/plain", "CF-Connecting-IP": ip, "User-Agent": ua },
+    headers,
     body: JSON.stringify(body),
   });
 }
